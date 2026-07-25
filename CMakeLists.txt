@@ -254,8 +254,30 @@ if(NEOTPC_BUILD_TESTS)
     endif()
 endif()
 
+<<<<<<< HEAD
 set(NEOTPC_DOC_DIR "${CMAKE_INSTALL_DATAROOTDIR}/doc/NeoTPC")
 install(FILES README.md DESTINATION ${NEOTPC_DOC_DIR})
+=======
+# vcpkg stores the authoritative license text for every installed port. Copy
+# those files into vcpkg-built distributions without making them source-tree
+# dependencies or requiring them for system-package builds.
+function(neotpc_install_vcpkg_copyright package_name output_name)
+    if(DEFINED VCPKG_INSTALLED_DIR AND DEFINED VCPKG_TARGET_TRIPLET)
+        set(_copyright
+            "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/share/${package_name}/copyright")
+        if(EXISTS "${_copyright}")
+            install(FILES "${_copyright}"
+                DESTINATION "${NEOTPC_DOC_DIR}/third-party"
+                RENAME "${output_name}")
+        endif()
+    endif()
+endfunction()
+
+neotpc_install_vcpkg_copyright(libspng libspng-LICENSE.txt)
+neotpc_install_vcpkg_copyright(libjpeg-turbo libjpeg-turbo-LICENSE.txt)
+neotpc_install_vcpkg_copyright(zlib zlib-LICENSE.txt)
+neotpc_install_vcpkg_copyright(wxwidgets wxWidgets-LICENSE.txt)
+>>>>>>> f28892f97b29088b73275e94259d8865e47ff781
 
 neo_force_static_msvc_runtime_for_directory_targets()
 neo_apply_minimal_release_to_directory_targets()
