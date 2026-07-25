@@ -1,4 +1,3 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
 cmake_minimum_required(VERSION 3.16)
 
 if(POLICY CMP0091)
@@ -237,9 +236,6 @@ if(NEOTPC_BUILD_TESTS)
         add_test(NAME neotpc-cli-fixture-info COMMAND neotpc-cli info ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/test.tpc)
     endif()
 endif()
-
-set(NEOTPC_DOC_DIR "${CMAKE_INSTALL_DATAROOTDIR}/doc/NeoTPC")
-install(FILES README.md LICENSE NOTICE.md THIRD_PARTY_NOTICES.md DESTINATION ${NEOTPC_DOC_DIR})
 
 # vcpkg stores the authoritative license text for every installed port. Copy
 # those files into vcpkg-built distributions without making them source-tree
