@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=NeoTPC
+Comment=Odyssey texture viewer and converter
+Exec=NeoTPC %f
+Icon=neotpc
+Terminal=false
+Categories=Utility;Development;Graphics;
+MimeType=image/x-tga;image/vnd-ms.dds;

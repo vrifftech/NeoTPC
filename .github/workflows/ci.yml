@@ -1,0 +1,207 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  repository_dispatch:
+    types: [neoshared-updated]
+  workflow_dispatch:
+    inputs:
+      neoshared_ref:
+        description: neoshared branch, tag, or commit SHA (blank uses NEOSHARED_REF or main)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NEOSHARED_REF: ${{ github.event.client_payload.neoshared_ref || inputs.neoshared_ref || vars.NEOSHARED_REF || 'main' }}
+
+jobs:
+  linux:
+    name: Linux (GCC + wxWidgets)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      VCPKG_BINARY_SOURCES: clear;x-gha,readwrite
+
+    steps:
+      - name: Check out NeoTPC
+        uses: actions/checkout@v7
+        with:
+          path: tool
+          persist-credentials: false
+
+      - name: Check out neoshared
+        uses: actions/checkout@v7
+        with:
+          repository: vrifftech/neoshared
+          ref: ${{ env.NEOSHARED_REF }}
+          path: neoshared
+          persist-credentials: false
+
+      - name: Read pinned vcpkg baseline
+        id: vcpkg-baseline
+        shell: bash
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          with open('tool/vcpkg.json', encoding='utf-8') as manifest_file:
+              print(f"sha={json.load(manifest_file)['builtin-baseline']}")
+          PY
+
+      - name: Check out pinned vcpkg
+        uses: actions/checkout@v7
+        with:
+          repository: microsoft/vcpkg
+          ref: ${{ steps.vcpkg-baseline.outputs.sha }}
+          path: vcpkg
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install system build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential \
+            cmake \
+            ninja-build \
+            pkg-config \
+            libwxgtk3.2-dev
+
+      - name: Bootstrap vcpkg
+        run: bash ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
+
+      - name: Enable vcpkg GitHub Actions cache
+        uses: actions/github-script@v9
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Configure and build
+        working-directory: tool
+        run: |
+          bash ./scripts/build.sh \
+            --build-dir build \
+            --build-type Release \
+            --wx ON \
+            --require-wx ON \
+            --cli ON \
+            --minimal-release OFF \
+            --generator Ninja \
+            --neoshared-root ../neoshared \
+            --vcpkg-root ../vcpkg \
+            --vcpkg-triplet x64-linux \
+            --jobs 2 \
+            --clean \
+            -- \
+            -DNEOTPC_BUILD_TESTS=ON
+
+      - name: Run tests
+        run: ctest --test-dir tool/build -C Release --output-on-failure
+
+      - name: Stage install tree
+        run: cmake --install tool/build --config Release --prefix tool/stage
+
+      - name: Upload Linux artifact
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: NeoTPC-linux-${{ github.sha }}
+          path: tool/stage/
+          if-no-files-found: error
+          retention-days: 14
+
+  windows:
+    name: Windows (Visual Studio 2026 + wxWidgets)
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 150
+    env:
+      VCPKG_BINARY_SOURCES: clear;x-gha,readwrite
+
+    steps:
+      - name: Check out NeoTPC
+        uses: actions/checkout@v7
+        with:
+          path: tool
+          persist-credentials: false
+
+      - name: Check out neoshared
+        uses: actions/checkout@v7
+        with:
+          repository: vrifftech/neoshared
+          ref: ${{ env.NEOSHARED_REF }}
+          path: neoshared
+          persist-credentials: false
+
+      - name: Read pinned vcpkg baseline
+        id: vcpkg-baseline
+        shell: pwsh
+        run: |
+          $manifest = Get-Content -Raw tool\vcpkg.json | ConvertFrom-Json
+          "sha=$($manifest.'builtin-baseline')" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Check out pinned vcpkg
+        uses: actions/checkout@v7
+        with:
+          repository: microsoft/vcpkg
+          ref: ${{ steps.vcpkg-baseline.outputs.sha }}
+          path: vcpkg
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Bootstrap vcpkg
+        shell: pwsh
+        run: |
+          & .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Enable vcpkg GitHub Actions cache
+        uses: actions/github-script@v9
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Configure and build
+        working-directory: tool
+        shell: pwsh
+        run: |
+          .\scripts\build.ps1 `
+            -BuildDir build `
+            -BuildType Release `
+            -Wx ON `
+            -RequireWx ON `
+            -Cli ON `
+            -MinimalRelease OFF `
+            -Generator 'Visual Studio 18 2026' `
+            -Platform x64 `
+            -NeoSharedRoot ..\neoshared `
+            -VcpkgRoot ..\vcpkg `
+            -VcpkgTriplet x64-windows-static `
+            -Parallel 2 `
+            -Clean `
+            -ExtraCMakeArgs '-DNEOTPC_BUILD_TESTS=ON'
+
+      - name: Run tests
+        shell: pwsh
+        run: ctest --test-dir tool/build -C Release --output-on-failure
+
+      - name: Stage install tree
+        shell: pwsh
+        run: cmake --install tool/build --config Release --prefix tool/stage
+
+      - name: Upload Windows artifact
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: NeoTPC-windows-vs2026-${{ github.sha }}
+          path: tool/stage/
+          if-no-files-found: error
+          retention-days: 14
