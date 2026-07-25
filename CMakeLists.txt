@@ -277,7 +277,5 @@ neotpc_install_vcpkg_copyright(libspng libspng-LICENSE.txt)
 neotpc_install_vcpkg_copyright(libjpeg-turbo libjpeg-turbo-LICENSE.txt)
 neotpc_install_vcpkg_copyright(zlib zlib-LICENSE.txt)
 neotpc_install_vcpkg_copyright(wxwidgets wxWidgets-LICENSE.txt)
->>>>>>> f28892f97b29088b73275e94259d8865e47ff781
-
 neo_force_static_msvc_runtime_for_directory_targets()
 neo_apply_minimal_release_to_directory_targets()
