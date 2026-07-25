@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
 #include "BatchDialog.hpp"
 
 #include "EncodingOptionsPanel.hpp"
@@ -110,7 +109,7 @@ void BatchDialog::onConvert() {
     options.overwrite = overwrite_->GetValue();
     options.saveOptions = options_->options();
 
-    wxProgressDialog progress("NeoTPC batch conversion", "Scanning textures…", 100, this,
+    wxProgressDialog progress("NeoTPC batch conversion", "Scanning textures...", 100, this,
                               wxPD_APP_MODAL | wxPD_CAN_ABORT | wxPD_ELAPSED_TIME | wxPD_ESTIMATED_TIME |
                               wxPD_REMAINING_TIME | wxPD_AUTO_HIDE);
     try {

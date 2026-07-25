@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
 #include "texture/BatchConverter.hpp"
 #include "texture/FileUtil.hpp"
 #include "texture/Image.hpp"

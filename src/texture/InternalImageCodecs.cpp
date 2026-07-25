@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
 #include "texture/InternalImageCodecs.hpp"
 
 #include "texture/Error.hpp"

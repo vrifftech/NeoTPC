@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
 #include "BatchDialog.hpp"
 #include "EncodingOptionsPanel.hpp"
 #include "PathUtils.hpp"
@@ -192,7 +191,7 @@ public:
         canvas_->setDarkMode(darkMode_);
         refreshCatalog();
         updateWindowState();
-        wxui::setStatusText(*this, "Ready — open or drop a texture", 0);
+        wxui::setStatusText(*this, "Ready - open or drop a texture", 0);
     }
 
     bool openPath(const fs::path& path) {
@@ -219,18 +218,21 @@ private:
     void buildMenus() {
         auto* menuBar = new wxMenuBar();
         auto* file = new wxMenu();
-        file->Append(wxID_OPEN, "&Open…\tCtrl+O");
+        file->Append(wxID_OPEN, "&Open...\tCtrl+O");
         recentFilesMenu_ = new wxMenu();
         file->AppendSubMenu(recentFilesMenu_, "Open &Recent");
         file->Append(ID_OPEN_CONFLICTS, "Open &Conflicting Images\tCtrl+Shift+O");
         file->Append(ID_CLOSE_CONFLICTS, "Close Image Comparison");
         file->Append(wxID_SAVE, "&Save\tCtrl+S");
-        file->Append(ID_SAVE_AS, "Save &As / Convert…\tCtrl+Shift+S");
+        file->Append(ID_SAVE_AS, "Save &As / Convert...\tCtrl+Shift+S");
         file->AppendSeparator();
-        file->Append(ID_BATCH_CONVERT, "&Batch Convert…");
+        file->Append(ID_BATCH_CONVERT, "&Batch Convert...");
         file->AppendSeparator();
         file->Append(ID_CLOSE_TEXTURE, "&Close Texture\tCtrl+W");
-        gameDirectoryMenu_ = neogames::appendOpenGameDirectoryMenu(*this, *file);
+        gameDirectoryMenu_ = neogames::appendOpenGameDirectoryMenu(
+            *this, *file, [this](const std::filesystem::path& directory) {
+                chooseOpen(directory);
+            });
         file->AppendSeparator();
         file->Append(wxID_EXIT, "E&xit\tAlt+F4");
         menuBar->Append(file, "&File");
@@ -245,8 +247,8 @@ private:
         menuBar->Append(view, "&View");
 
         auto* tools = new wxMenu();
-        tools->Append(ID_SET_ALPHA, "Set Alpha…");
-        tools->Append(ID_SCALE_ALPHA, "Scale Alpha…");
+        tools->Append(ID_SET_ALPHA, "Set Alpha...");
+        tools->Append(ID_SCALE_ALPHA, "Scale Alpha...");
         tools->Append(ID_INVERT_ALPHA, "Invert Alpha");
         tools->AppendSeparator();
         tools->Append(ID_FLIP_HORIZONTAL, "Flip Pixels Horizontally");
@@ -364,13 +366,13 @@ private:
 
         const auto path = comparisonPath(paneIndex);
         const auto* texture = comparisonTexture(paneIndex);
-        wxString title = paneIndex == 0 ? "Current (editable) · " : "Conflict (read-only) · ";
+        wxString title = paneIndex == 0 ? "Current (editable) | " : "Conflict (read-only) | ";
         title += path.empty() ? wxString("No texture open") : wxpath::toWx(path.filename());
         if (texture != nullptr) {
-            title += " · ";
+            title += " | ";
             title += wxui::toWx(neotpc::texture::textureFileKindToString(texture->kind));
             if (texture->hasPixels()) {
-                title += wxString::Format(" · %u×%u · %llu layer(s)",
+                title += wxString::Format(" | %u x %u | %llu layer(s)",
                     texture->layers.front().width, texture->layers.front().height,
                     static_cast<unsigned long long>(texture->layers.size()));
             }
@@ -472,7 +474,7 @@ private:
         root->Add(optionsPanel_, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(8));
 
         auto* transforms = new wxStaticBoxSizer(wxHORIZONTAL, page, "Pixel operations");
-        transforms->Add(new wxButton(page, ID_SET_ALPHA, "Set alpha…"), 0, wxALL, FromDIP(5));
+        transforms->Add(new wxButton(page, ID_SET_ALPHA, "Set alpha..."), 0, wxALL, FromDIP(5));
         transforms->Add(new wxButton(page, ID_INVERT_ALPHA, "Invert alpha"), 0, wxTOP | wxBOTTOM | wxRIGHT, FromDIP(5));
         transforms->Add(new wxButton(page, ID_FLIP_HORIZONTAL, "Flip X"), 0, wxTOP | wxBOTTOM | wxRIGHT, FromDIP(5));
         transforms->Add(new wxButton(page, ID_FLIP_VERTICAL, "Flip Y"), 0, wxTOP | wxBOTTOM | wxRIGHT, FromDIP(5));
@@ -521,7 +523,7 @@ private:
         auto* page = new wxPanel(notebook_, wxID_ANY);
         auto* root = new wxBoxSizer(wxVERTICAL);
         catalogFilter_ = new wxTextCtrl(page, wxID_ANY);
-        catalogFilter_->SetHint("Filter TXI keys, meanings, or categories…");
+        catalogFilter_->SetHint("Filter TXI keys, meanings, or categories...");
         catalog_ = new wxTextCtrl(page, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize,
                                   wxTE_MULTILINE | wxTE_READONLY | wxTE_DONTWRAP);
         root->Add(catalogFilter_, 0, wxEXPAND | wxALL, FromDIP(8));
@@ -531,8 +533,8 @@ private:
         catalogFilter_->Bind(wxEVT_TEXT, [this](wxCommandEvent&) { refreshCatalog(); });
     }
 
-    void chooseOpen() {
-        wxFileDialog dialog(this, "Open texture", wxEmptyString, wxEmptyString, openWildcard(),
+    void chooseOpen(const std::filesystem::path& initialDirectory = {}) {
+        wxFileDialog dialog(this, "Open texture", wxpath::toWx(initialDirectory), wxEmptyString, openWildcard(),
                             wxFD_OPEN | wxFD_FILE_MUST_EXIST);
         if (dialog.ShowModal() == wxID_OK) openPath(wxpath::fromWx(dialog.GetPath()));
     }
@@ -632,7 +634,7 @@ private:
             std::uint64_t decodedBytes = 0;
             bool cancelled = false;
             {
-                wxProgressDialog progress("Open Conflicting Images", "Preparing comparison images…",
+                wxProgressDialog progress("Open Conflicting Images", "Preparing comparison images...",
                                           static_cast<int>(std::max<std::size_t>(1, attemptCount)), this,
                                           wxPD_CAN_ABORT | wxPD_APP_MODAL | wxPD_AUTO_HIDE |
                                           wxPD_ELAPSED_TIME | wxPD_REMAINING_TIME);
@@ -765,12 +767,12 @@ private:
             const auto& layer = texture.layers[index];
             if (texture.cubeMap && texture.cubeFaces.size() == texture.layers.size()) {
                 const auto faceName = wxui::toWx(neotpc::texture::cubeFaceToString(texture.cubeFaces[index]));
-                layerChoice_->Append(wxString::Format("Cube face %s — %u×%u · %llu mip(s)",
+                layerChoice_->Append(wxString::Format("Cube face %s - %u x %u | %llu mip(s)",
                     faceName.c_str(),
                     layer.width, layer.height, static_cast<unsigned long long>(layer.mipmaps.size() + 1)));
             } else {
                 wxString prefix = texture.cubeMap ? "Cube face" : texture.animated ? "Frame" : "Layer";
-                layerChoice_->Append(wxString::Format("%s %llu — %u×%u · %llu mip(s)", prefix.c_str(),
+                layerChoice_->Append(wxString::Format("%s %llu - %u x %u | %llu mip(s)", prefix.c_str(),
                     static_cast<unsigned long long>(index + 1), layer.width, layer.height,
                     static_cast<unsigned long long>(layer.mipmaps.size() + 1)));
             }
@@ -803,10 +805,10 @@ private:
         if (layerSelection == wxNOT_FOUND) layerSelection = 0;
         layerSelection = std::clamp(layerSelection, 0, static_cast<int>(document_.texture().layers.size() - 1));
         const auto& layer = document_.texture().layers[static_cast<std::size_t>(layerSelection)];
-        mipChoice_->Append(wxString::Format("Level 0 (base) — %u×%u", layer.width, layer.height));
+        mipChoice_->Append(wxString::Format("Level 0 (base) - %u x %u", layer.width, layer.height));
         for (std::size_t index = 0; index < layer.mipmaps.size(); ++index) {
             const auto& mip = layer.mipmaps[index];
-            mipChoice_->Append(wxString::Format("Level %llu — %u×%u",
+            mipChoice_->Append(wxString::Format("Level %llu - %u x %u",
                 static_cast<unsigned long long>(index + 1), mip.width, mip.height));
         }
         const int selection = previous == wxNOT_FOUND
@@ -838,7 +840,7 @@ private:
         if (const auto* preview = previewLayerAt(document_.texture(), layerIndex, mipIndex)) {
             canvas_->setImage(makePreviewImage(*preview, previewMode));
         } else {
-            canvas_->clearImage("TXI-only document — no pixel data");
+            canvas_->clearImage("TXI-only document - no pixel data");
         }
         for (auto& comparison : comparisonImages_) {
             if (comparison.canvas == nullptr) continue;
@@ -877,7 +879,7 @@ private:
         if (mipSelection == wxNOT_FOUND) mipSelection = 0;
         mipSelection = std::clamp(mipSelection, 0, static_cast<int>(layer.mipmaps.size()));
         const auto& preview = mipSelection == 0 ? layer : layer.mipmaps[static_cast<std::size_t>(mipSelection - 1)];
-        wxui::setStatusText(*this, wxString::Format("%u×%u · layer %d/%llu · mip %d/%llu · %d%%",
+        wxui::setStatusText(*this, wxString::Format("%u x %u | layer %d/%llu | mip %d/%llu | %d%%",
             preview.width, preview.height, selection + 1,
             static_cast<unsigned long long>(document_.texture().layers.size()), mipSelection,
             static_cast<unsigned long long>(layer.mipmaps.size()), canvas_->zoomPercent()), 1);
@@ -948,7 +950,7 @@ private:
                                      static_cast<unsigned long long>(comparisonImages_.size()));
         }
         if (document_.dirty()) name += " *";
-        SetTitle(name + " — NeoTPC");
+        SetTitle(name + " - NeoTPC");
         for (int id : {ID_SAVE_AS, ID_CLOSE_TEXTURE, ID_OPEN_CONFLICTS}) GetMenuBar()->Enable(id, open);
         GetMenuBar()->Enable(ID_CLOSE_CONFLICTS, !comparisonImages_.empty());
         GetMenuBar()->Enable(wxID_SAVE, open && document_.dirty());
@@ -987,7 +989,7 @@ private:
 
     void setAlpha() {
         if (!document_.isOpen() || !document_.texture().hasPixels()) return;
-        wxTextEntryDialog dialog(this, "Alpha value (0–255)", "Set alpha", "255");
+        wxTextEntryDialog dialog(this, "Alpha value (0-255)", "Set alpha", "255");
         wxui::applyTheme(&dialog, darkMode_);
         if (dialog.ShowModal() != wxID_OK) return;
         long value = 0;
@@ -1049,8 +1051,6 @@ private:
         info.SetName(kAppName);
         info.SetVersion(NEOTPC_VERSION);
         info.SetDescription("TPC/TXB/TGA/DDS texture viewer, conflict comparator, TXI inspector, and converter for the Neo tool suite.");
-        info.SetCopyright("GPL-3.0-or-later");
-        info.SetLicence("This program comes with no warranty. See LICENSE and THIRD_PARTY_NOTICES.md.");
         wxAboutBox(info, this);
     }
 

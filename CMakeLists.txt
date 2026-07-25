@@ -1,4 +1,3 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
 cmake_minimum_required(VERSION 3.16)
 
 if(POLICY CMP0091)
@@ -156,11 +155,24 @@ endfunction()
 
 if(NEOTPC_BUILD_WX_GUI)
     set(NEOTPC_WX_COMPONENTS core base adv)
-    set(_neo_prefer_wx_config_package OFF)
-    if(WIN32 OR DEFINED VCPKG_TARGET_TRIPLET OR CMAKE_TOOLCHAIN_FILE MATCHES "vcpkg.cmake")
-        set(_neo_prefer_wx_config_package ON)
+
+    # CMake's Unix FindwxWidgets module searches wx-config only inside the
+    # active find root. A vcpkg toolchain changes that root, which can hide
+    # the system wx-config installed by Linux distributions. Resolve the
+    # native tool explicitly before calling find_package().
+    if(UNIX AND NOT APPLE AND NOT CMAKE_CROSSCOMPILING
+       AND NOT wxWidgets_CONFIG_EXECUTABLE)
+        find_program(NEOTPC_SYSTEM_WX_CONFIG
+            NAMES wx-config
+            NO_CMAKE_FIND_ROOT_PATH)
+        if(NEOTPC_SYSTEM_WX_CONFIG)
+            set(wxWidgets_CONFIG_EXECUTABLE
+                "${NEOTPC_SYSTEM_WX_CONFIG}"
+                CACHE FILEPATH "Path to wx-config" FORCE)
+        endif()
     endif()
-    if(_neo_prefer_wx_config_package)
+
+    if(WIN32)
         find_package(wxWidgets CONFIG QUIET COMPONENTS ${NEOTPC_WX_COMPONENTS})
         if(NOT wxWidgets_FOUND AND NOT TARGET wx::core AND NOT TARGET wxWidgets::wxWidgets)
             find_package(wxWidgets CONFIG QUIET)
@@ -218,7 +230,11 @@ if(NEOTPC_BUILD_WX_GUI)
                     DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/applications)
         endif()
     elseif(NEOTPC_REQUIRE_WX_GUI)
-        message(FATAL_ERROR "wxWidgets was not found, but NEOTPC_REQUIRE_WX_GUI is ON. Configure with the vcpkg toolchain on Windows, or install the wxWidgets development package on this platform.")
+        message(FATAL_ERROR
+            "wxWidgets was not found, but NEOTPC_REQUIRE_WX_GUI is ON. "
+            "On Debian or Ubuntu, install libwxgtk3.2-dev. When a toolchain "
+            "hides host programs, configure with "
+            "-DwxWidgets_CONFIG_EXECUTABLE=/usr/bin/wx-config.")
     else()
         message(WARNING "wxWidgets was not found. NeoTPC core and CLI targets will still build.")
     endif()
@@ -239,27 +255,7 @@ if(NEOTPC_BUILD_TESTS)
 endif()
 
 set(NEOTPC_DOC_DIR "${CMAKE_INSTALL_DATAROOTDIR}/doc/NeoTPC")
-install(FILES README.md LICENSE NOTICE.md THIRD_PARTY_NOTICES.md DESTINATION ${NEOTPC_DOC_DIR})
-
-# vcpkg stores the authoritative license text for every installed port. Copy
-# those files into vcpkg-built distributions without making them source-tree
-# dependencies or requiring them for system-package builds.
-function(neotpc_install_vcpkg_copyright package_name output_name)
-    if(DEFINED VCPKG_INSTALLED_DIR AND DEFINED VCPKG_TARGET_TRIPLET)
-        set(_copyright
-            "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/share/${package_name}/copyright")
-        if(EXISTS "${_copyright}")
-            install(FILES "${_copyright}"
-                DESTINATION "${NEOTPC_DOC_DIR}/third-party"
-                RENAME "${output_name}")
-        endif()
-    endif()
-endfunction()
-
-neotpc_install_vcpkg_copyright(libspng libspng-LICENSE.txt)
-neotpc_install_vcpkg_copyright(libjpeg-turbo libjpeg-turbo-LICENSE.txt)
-neotpc_install_vcpkg_copyright(zlib zlib-LICENSE.txt)
-neotpc_install_vcpkg_copyright(wxwidgets wxWidgets-LICENSE.txt)
+install(FILES README.md DESTINATION ${NEOTPC_DOC_DIR})
 
 neo_force_static_msvc_runtime_for_directory_targets()
 neo_apply_minimal_release_to_directory_targets()

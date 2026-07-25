@@ -29,6 +29,7 @@ jobs:
     timeout-minutes: 60
     env:
       VCPKG_BINARY_SOURCES: clear;x-gha,readwrite
+      WX_CONFIG: /usr/bin/wx-config
 
     steps:
       - name: Check out NeoTPC
@@ -74,6 +75,13 @@ jobs:
             pkg-config \
             libwxgtk3.2-dev
 
+      - name: Verify system wxWidgets
+        run: |
+          test -x "$WX_CONFIG"
+          "$WX_CONFIG" --version
+          "$WX_CONFIG" --selected-config
+          "$WX_CONFIG" --libs core,base,adv > /dev/null
+
       - name: Bootstrap vcpkg
         run: bash ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
 
@@ -101,7 +109,8 @@ jobs:
             --jobs 2 \
             --clean \
             -- \
-            -DNEOTPC_BUILD_TESTS=ON
+            -DNEOTPC_BUILD_TESTS=ON \
+            -DwxWidgets_CONFIG_EXECUTABLE="$WX_CONFIG"
 
       - name: Run tests
         run: ctest --test-dir tool/build -C Release --output-on-failure
