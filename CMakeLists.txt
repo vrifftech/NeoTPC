@@ -232,7 +232,7 @@ if(NEOTPC_BUILD_WX_GUI)
     elseif(NEOTPC_REQUIRE_WX_GUI)
         message(FATAL_ERROR
             "wxWidgets was not found, but NEOTPC_REQUIRE_WX_GUI is ON. "
-            "On Debian or Ubuntu, install libwxgtk3.2-dev. When a toolchain "
+            "On Debian or Ubuntu, install libwxgtk3.2-dev. On Windows, use the pinned wxWidgets 3.3.3 overlay from neoshared. When a toolchain "
             "hides host programs, configure with "
             "-DwxWidgets_CONFIG_EXECUTABLE=/usr/bin/wx-config.")
     else()
@@ -256,24 +256,6 @@ endif()
 
 set(NEOTPC_DOC_DIR "${CMAKE_INSTALL_DATAROOTDIR}/doc/NeoTPC")
 install(FILES README.md DESTINATION ${NEOTPC_DOC_DIR})
-# vcpkg stores the authoritative license text for every installed port. Copy
-# those files into vcpkg-built distributions without making them source-tree
-# dependencies or requiring them for system-package builds.
-function(neotpc_install_vcpkg_copyright package_name output_name)
-    if(DEFINED VCPKG_INSTALLED_DIR AND DEFINED VCPKG_TARGET_TRIPLET)
-        set(_copyright
-            "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/share/${package_name}/copyright")
-        if(EXISTS "${_copyright}")
-            install(FILES "${_copyright}"
-                DESTINATION "${NEOTPC_DOC_DIR}/third-party"
-                RENAME "${output_name}")
-        endif()
-    endif()
-endfunction()
 
-neotpc_install_vcpkg_copyright(libspng libspng-LICENSE.txt)
-neotpc_install_vcpkg_copyright(libjpeg-turbo libjpeg-turbo-LICENSE.txt)
-neotpc_install_vcpkg_copyright(zlib zlib-LICENSE.txt)
-neotpc_install_vcpkg_copyright(wxwidgets wxWidgets-LICENSE.txt)
 neo_force_static_msvc_runtime_for_directory_targets()
 neo_apply_minimal_release_to_directory_targets()

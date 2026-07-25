@@ -58,6 +58,14 @@ $cmakeArgs += @(
     "-DNEOTPC_BUILD_CLI=$Cli"
 )
 
+if ([string]::IsNullOrWhiteSpace($NeoSharedRoot)) {
+    $SiblingNeoShared = Join-Path (Split-Path $RootDir -Parent) 'neoshared'
+    if (Test-Path -LiteralPath (Join-Path $SiblingNeoShared 'CMakeLists.txt')) {
+        $NeoSharedRoot = $SiblingNeoShared
+    }
+}
+
+$VcpkgOverlayPorts = $null
 if (-not [string]::IsNullOrWhiteSpace($NeoSharedRoot)) {
     if (-not [System.IO.Path]::IsPathRooted($NeoSharedRoot)) {
         $NeoSharedRoot = Join-Path $RootDir $NeoSharedRoot
@@ -67,6 +75,11 @@ if (-not [string]::IsNullOrWhiteSpace($NeoSharedRoot)) {
         throw "neoshared CMakeLists.txt not found under: $NeoSharedRoot"
     }
     $cmakeArgs += "-DNEOSHARED_ROOT=$NeoSharedRoot"
+
+    $OverlayCandidate = Join-Path $NeoSharedRoot 'vcpkg-ports'
+    if (Test-Path -LiteralPath (Join-Path $OverlayCandidate 'wxwidgets\vcpkg.json')) {
+        $VcpkgOverlayPorts = $OverlayCandidate
+    }
 }
 
 if (-not $NoVcpkg) {
@@ -98,6 +111,9 @@ if (-not $NoVcpkg) {
         )
         if (-not [string]::IsNullOrWhiteSpace($VcpkgTriplet)) {
             $cmakeArgs += "-DVCPKG_TARGET_TRIPLET=$VcpkgTriplet"
+        }
+        if (-not [string]::IsNullOrWhiteSpace($VcpkgOverlayPorts)) {
+            $cmakeArgs += "-DVCPKG_OVERLAY_PORTS=$VcpkgOverlayPorts"
         }
     }
 }

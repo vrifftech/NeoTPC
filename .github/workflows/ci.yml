@@ -24,7 +24,7 @@ env:
 
 jobs:
   linux:
-    name: Linux (GCC + wxWidgets)
+    name: Linux (GCC + system wxWidgets)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
@@ -128,7 +128,7 @@ jobs:
           retention-days: 14
 
   windows:
-    name: Windows (Visual Studio 2026 + wxWidgets)
+    name: Windows (Visual Studio 2026 + wxWidgets 3.3.3)
     runs-on: windows-2025-vs2026
     timeout-minutes: 150
     env:
@@ -177,6 +177,14 @@ jobs:
           script: |
             core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Install wxWidgets 3.3.3
+        shell: pwsh
+        run: |
+          & .\neoshared\scripts\install-wxwidgets.ps1 `
+            -VcpkgRoot .\vcpkg `
+            -Triplet x64-windows-static `
+            -CleanAfterBuild
 
       - name: Configure and build
         working-directory: tool
