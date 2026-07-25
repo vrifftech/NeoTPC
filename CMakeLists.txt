@@ -256,7 +256,6 @@ endif()
 
 set(NEOTPC_DOC_DIR "${CMAKE_INSTALL_DATAROOTDIR}/doc/NeoTPC")
 install(FILES README.md DESTINATION ${NEOTPC_DOC_DIR})
-=======
 # vcpkg stores the authoritative license text for every installed port. Copy
 # those files into vcpkg-built distributions without making them source-tree
 # dependencies or requiring them for system-package builds.
