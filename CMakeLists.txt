@@ -254,7 +254,6 @@ if(NEOTPC_BUILD_TESTS)
     endif()
 endif()
 
-<<<<<<< HEAD
 set(NEOTPC_DOC_DIR "${CMAKE_INSTALL_DATAROOTDIR}/doc/NeoTPC")
 install(FILES README.md DESTINATION ${NEOTPC_DOC_DIR})
 =======
