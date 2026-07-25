@@ -24,7 +24,7 @@ bool isOutputExtension(const std::string& extension) {
 }
 
 std::string pathKey(const fs::path& path) {
-    auto key = path.lexically_normal().generic_string();
+    auto key = genericPathToUtf8(path.lexically_normal());
 #if defined(_WIN32)
     key = asciiLower(std::move(key));
 #endif
@@ -54,14 +54,22 @@ fs::path collisionPath(const fs::path& initial,
                        std::set<std::string>& claimed) {
     if (claimed.insert(pathKey(initial)).second) return initial;
 
-    const auto sourceExtension = normalizeTextureExtension(source.extension().string());
-    const auto outputExtension = initial.extension().string();
+    const auto sourceExtension = normalizeTextureExtension(extensionLower(source));
+    const auto outputExtension = initial.extension();
     const auto parent = initial.parent_path();
-    const auto stem = initial.stem().string() + "." + sourceExtension;
-    auto candidate = parent / (stem + outputExtension);
+
+    auto collisionStem = initial.stem();
+    collisionStem += fs::path("." + sourceExtension).native();
+
+    auto candidateName = collisionStem;
+    candidateName += outputExtension.native();
+    auto candidate = parent / candidateName;
     unsigned suffix = 2;
     while (!claimed.insert(pathKey(candidate)).second) {
-        candidate = parent / (stem + "-" + std::to_string(suffix++) + outputExtension);
+        candidateName = collisionStem;
+        candidateName += fs::path("-" + std::to_string(suffix++)).native();
+        candidateName += outputExtension.native();
+        candidate = parent / candidateName;
     }
     return candidate;
 }
@@ -89,7 +97,7 @@ fs::path lexicalRelativePath(const fs::path& path, const fs::path& root) {
     if (ec) throw TextureError("Unable to resolve batch input directory: " + ec.message());
     const fs::path relative = absolutePath.lexically_relative(absoluteRoot);
     if (!safeRelativePath(relative)) {
-        throw TextureError("Batch input is outside the selected input directory: " + path.string());
+        throw TextureError("Batch input is outside the selected input directory: " + pathToUtf8(path));
     }
     return relative;
 }
@@ -115,7 +123,7 @@ void requireContainedOutput(const fs::path& outputRoot, const fs::path& output) 
     if (!pathIsWithin(canonicalRoot, canonicalParent) ||
         !pathIsWithin(canonicalRoot, canonicalOutput)) {
         throw TextureError("Refusing batch output outside the selected output directory: " +
-                           output.string());
+                           pathToUtf8(output));
     }
 
     ec.clear();
@@ -124,7 +132,7 @@ void requireContainedOutput(const fs::path& outputRoot, const fs::path& output) 
         throw TextureError("Unable to inspect batch output path: " + ec.message());
     }
     if (!ec && fs::is_symlink(status)) {
-        throw TextureError("Refusing to replace a symlinked batch output: " + output.string());
+        throw TextureError("Refusing to replace a symlinked batch output: " + pathToUtf8(output));
     }
 }
 
@@ -148,8 +156,8 @@ std::string BatchReport::summary() const {
         for (const auto& item : items) {
             const char* status = item.status == BatchItemStatus::Converted ? "converted" :
                                  item.status == BatchItemStatus::Skipped ? "skipped" : "failed";
-            out << status << '\t' << item.input.generic_string() << '\t'
-                << item.output.generic_string() << '\t' << oneLine(item.message) << '\n';
+            out << status << '\t' << genericPathToUtf8(item.input) << '\t'
+                << genericPathToUtf8(item.output) << '\t' << oneLine(item.message) << '\n';
         }
     }
     return out.str();
@@ -160,7 +168,7 @@ BatchReport batchConvertTextures(const fs::path& inputDirectory,
                                  const BatchOptions& options,
                                  const BatchProgress& progress) {
     if (!fs::is_directory(inputDirectory)) {
-        throw TextureError("Batch input is not a directory: " + inputDirectory.string());
+        throw TextureError("Batch input is not a directory: " + pathToUtf8(inputDirectory));
     }
     if (outputDirectory.empty()) throw TextureError("Batch output directory is empty");
 
@@ -199,7 +207,7 @@ BatchReport batchConvertTextures(const fs::path& inputDirectory,
     }
 
     std::sort(inputs.begin(), inputs.end(), [](const fs::path& left, const fs::path& right) {
-        return left.generic_string() < right.generic_string();
+        return pathKey(left) < pathKey(right);
     });
 
     BatchReport report;

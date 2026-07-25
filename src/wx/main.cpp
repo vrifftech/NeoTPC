@@ -677,12 +677,12 @@ private:
                             break;
                         }
                         if (!texture.hasPixels()) {
-                            failures.push_back(candidates[index].filename().string() + ": no pixel data");
+                            failures.push_back(neotpc::texture::pathToUtf8(candidates[index].filename()) + ": no pixel data");
                             continue;
                         }
                         const auto imageBytes = decodedTextureBytes(texture);
                         if (imageBytes > remainingDecodedBytes) {
-                            failures.push_back(candidates[index].filename().string() +
+                            failures.push_back(neotpc::texture::pathToUtf8(candidates[index].filename()) +
                                                ": skipped because the comparison memory limit was reached");
                             continue;
                         }
@@ -693,7 +693,7 @@ private:
                             cancelled = true;
                             break;
                         }
-                        failures.push_back(candidates[index].filename().string() + ": " + error.what());
+                        failures.push_back(neotpc::texture::pathToUtf8(candidates[index].filename()) + ": " + error.what());
                     }
                 }
                 if (!cancelled && attemptCount != 0) {

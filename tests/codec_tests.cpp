@@ -756,13 +756,41 @@ void testConflictingImageDiscovery(const fs::path& root) {
     require(matches.size() == expectedNames.size(), "conflicting-image discovery returned the wrong number of files");
     require(matches.front().filename() == fs::path("DXUNtex.tga"), "current image was not first in the conflict set");
     std::set<std::string> names;
-    for (const auto& match : matches) names.insert(match.filename().string());
+    for (const auto& match : matches) names.insert(neotpc::texture::pathToUtf8(match.filename()));
     require(names == std::set<std::string>(expectedNames.begin(), expectedNames.end()),
             "conflicting-image discovery included a distractor or missed a filename variant");
     const auto fromSuffixedName = neotpc::texture::findConflictingTexturePaths(directory / "dxuntex(2) - copy.tpc");
     require(fromSuffixedName.size() == expectedNames.size() &&
             fromSuffixedName.front().filename() == fs::path("dxuntex(2) - copy.tpc"),
             "conflicting-image discovery did not use a suffixed current filename as the group root");
+
+    const auto unicodeDirectory = root / fs::u8path(u8"conflicting-\u6e2c\u8a66-\U0001f5bc");
+    fs::create_directories(unicodeDirectory);
+    const std::vector<std::string> unicodeExpectedNames = {
+        u8"\u6e2c\u8a66Texture.tga",
+        u8"\u6e2c\u8a66texture(2).tpc",
+        u8"\u6e2c\u8a66TEXTURE - copy.dds",
+    };
+    for (const auto& name : unicodeExpectedNames) {
+        neotpc::texture::writeFileBytes(unicodeDirectory / fs::u8path(name), {0});
+    }
+    neotpc::texture::writeFileBytes(
+        unicodeDirectory / fs::u8path(u8"\u6e2c\u8a66texture_backup.tga"), {0});
+
+    const auto unicodeCurrent = unicodeDirectory / fs::u8path(unicodeExpectedNames.front());
+    const auto unicodeMatches = neotpc::texture::findConflictingTexturePaths(unicodeCurrent);
+    require(unicodeMatches.size() == unicodeExpectedNames.size(),
+            "Unicode conflicting-image discovery returned the wrong number of files");
+    require(unicodeMatches.front() == unicodeCurrent,
+            "Unicode current image was not first in the conflict set");
+    std::set<std::string> unicodeNames;
+    for (const auto& match : unicodeMatches) {
+        unicodeNames.insert(neotpc::texture::pathToUtf8(match.filename()));
+    }
+    require(unicodeNames == std::set<std::string>(unicodeExpectedNames.begin(), unicodeExpectedNames.end()),
+            "Unicode conflicting-image discovery lost or misidentified a filename");
+    require(neotpc::texture::pathToUtf8(unicodeCurrent).find(unicodeExpectedNames.front()) != std::string::npos,
+            "Unicode path conversion did not preserve the filename as UTF-8");
 }
 
 void testDocument(const fs::path& root) {

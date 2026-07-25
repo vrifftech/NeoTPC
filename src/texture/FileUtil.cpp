@@ -3,7 +3,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cctype>
 #include <cerrno>
 #include <cstring>
 #include <fstream>
@@ -24,17 +23,48 @@
 namespace neotpc::texture {
 namespace {
 
+#if defined(_WIN32)
+std::string widePathToUtf8(const std::wstring& value) {
+    if (value.empty()) return {};
+    if (value.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        throw std::length_error("Windows path is too long to encode as UTF-8");
+    }
+
+    const int inputLength = static_cast<int>(value.size());
+    const int outputLength = WideCharToMultiByte(
+        CP_UTF8, 0, value.data(), inputLength, nullptr, 0, nullptr, nullptr);
+    if (outputLength <= 0) {
+        throw std::system_error(static_cast<int>(GetLastError()), std::system_category(),
+                                "Unable to encode Windows path as UTF-8");
+    }
+
+    std::string output(static_cast<std::size_t>(outputLength), '\0');
+    const int converted = WideCharToMultiByte(
+        CP_UTF8, 0, value.data(), inputLength, output.data(), outputLength, nullptr, nullptr);
+    if (converted != outputLength) {
+        throw std::system_error(static_cast<int>(GetLastError()), std::system_category(),
+                                "Unable to encode Windows path as UTF-8");
+    }
+    return output;
+}
+#endif
+
 std::string systemErrorText(const std::string& action, const std::filesystem::path& path) {
 #if defined(_WIN32)
-    return action + ": " + path.string() + " (Windows error " + std::to_string(GetLastError()) + ")";
+    const DWORD error = GetLastError();
+    return action + ": " + pathToUtf8(path) + " (Windows error " + std::to_string(error) + ")";
 #else
-    return action + ": " + path.string() + ": " + std::strerror(errno);
+    return action + ": " + pathToUtf8(path) + ": " + std::strerror(errno);
 #endif
 }
 
+bool isAsciiSpace(unsigned char ch) {
+    return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\f' || ch == '\v';
+}
+
 void trimAsciiSpaces(std::string& value) {
-    const auto first = std::find_if_not(value.begin(), value.end(), [](unsigned char ch) { return std::isspace(ch) != 0; });
-    const auto last = std::find_if_not(value.rbegin(), value.rend(), [](unsigned char ch) { return std::isspace(ch) != 0; }).base();
+    const auto first = std::find_if_not(value.begin(), value.end(), isAsciiSpace);
+    const auto last = std::find_if_not(value.rbegin(), value.rend(), isAsciiSpace).base();
     value = first < last ? std::string(first, last) : std::string{};
 }
 
@@ -44,7 +74,7 @@ bool removeTrailingDuplicateNumber(std::string& value) {
     const auto open = value.find_last_of('(');
     if (open == std::string::npos || open + 2 >= value.size()) return false;
     if (!std::all_of(value.begin() + static_cast<std::ptrdiff_t>(open + 1), value.end() - 1,
-                     [](unsigned char ch) { return std::isdigit(ch) != 0; })) {
+                     [](unsigned char ch) { return ch >= '0' && ch <= '9'; })) {
         return false;
     }
     value.erase(open);
@@ -76,7 +106,7 @@ std::string normalizedPathKey(const std::filesystem::path& path) {
     std::error_code ec;
     auto absolute = std::filesystem::absolute(path, ec);
     if (ec) absolute = path;
-    return absolute.lexically_normal().generic_string();
+    return genericPathToUtf8(absolute.lexically_normal());
 }
 
 bool pathsReferToSameFile(const std::filesystem::path& left, const std::filesystem::path& right) {
@@ -94,15 +124,32 @@ bool pathsReferToSameFile(const std::filesystem::path& left, const std::filesyst
 
 static void flushFileToDisk(const std::filesystem::path& path);
 
+std::string pathToUtf8(const std::filesystem::path& path) {
+#if defined(_WIN32)
+    return widePathToUtf8(path.native());
+#else
+    return path.native();
+#endif
+}
+
+std::string genericPathToUtf8(const std::filesystem::path& path) {
+    auto value = pathToUtf8(path);
+#if defined(_WIN32)
+    std::replace(value.begin(), value.end(), '\\', '/');
+#endif
+    return value;
+}
+
 std::string asciiLower(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
-        return static_cast<char>(std::tolower(ch));
+        if (ch >= 'A' && ch <= 'Z') return static_cast<char>(ch + ('a' - 'A'));
+        return static_cast<char>(ch);
     });
     return value;
 }
 
 std::string extensionLower(const std::filesystem::path& path) {
-    auto ext = path.extension().string();
+    auto ext = pathToUtf8(path.extension());
     if (!ext.empty() && ext.front() == '.') {
         ext.erase(ext.begin());
     }
@@ -116,45 +163,45 @@ std::vector<std::uint8_t> readFileBytes(const std::filesystem::path& path) {
 std::vector<std::uint8_t> readFileBytes(const std::filesystem::path& path, std::uintmax_t maxBytes) {
     std::error_code ec;
     const auto size = std::filesystem::file_size(path, ec);
-    if (ec) throw std::runtime_error("Unable to inspect file: " + path.string() + ": " + ec.message());
+    if (ec) throw std::runtime_error("Unable to inspect file: " + pathToUtf8(path) + ": " + ec.message());
     if (size > maxBytes) {
         throw std::runtime_error("Refusing to read file larger than limit (" + std::to_string(size) + " > " +
-                                 std::to_string(maxBytes) + "): " + path.string());
+                                 std::to_string(maxBytes) + "): " + pathToUtf8(path));
     }
     if (size > static_cast<std::uintmax_t>(std::numeric_limits<std::size_t>::max())) {
-        throw std::runtime_error("File is too large for this process: " + path.string());
+        throw std::runtime_error("File is too large for this process: " + pathToUtf8(path));
     }
     if (size > static_cast<std::uintmax_t>(std::numeric_limits<std::streamsize>::max())) {
-        throw std::runtime_error("File is too large for one bounded stream read: " + path.string());
+        throw std::runtime_error("File is too large for one bounded stream read: " + pathToUtf8(path));
     }
     std::ifstream in(path, std::ios::binary);
-    if (!in) throw std::runtime_error("Unable to open file: " + path.string());
+    if (!in) throw std::runtime_error("Unable to open file: " + pathToUtf8(path));
     std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
     if (!bytes.empty()) in.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-    if (!in && !in.eof()) throw std::runtime_error("Unable to read file: " + path.string());
+    if (!in && !in.eof()) throw std::runtime_error("Unable to read file: " + pathToUtf8(path));
     if (static_cast<std::size_t>(in.gcount()) != bytes.size()) {
-        throw std::runtime_error("File changed while it was being read: " + path.string());
+        throw std::runtime_error("File changed while it was being read: " + pathToUtf8(path));
     }
     char extra = 0;
-    if (in.read(&extra, 1)) throw std::runtime_error("File grew beyond its inspected size while reading: " + path.string());
+    if (in.read(&extra, 1)) throw std::runtime_error("File grew beyond its inspected size while reading: " + pathToUtf8(path));
     return bytes;
 }
 
 void writeFileBytes(const std::filesystem::path& path, const std::vector<std::uint8_t>& bytes) {
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
     if (!out) {
-        throw std::runtime_error("Unable to open file for writing: " + path.string());
+        throw std::runtime_error("Unable to open file for writing: " + pathToUtf8(path));
     }
     if (!bytes.empty()) {
         out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
     }
     if (!out) {
-        throw std::runtime_error("Unable to write file: " + path.string());
+        throw std::runtime_error("Unable to write file: " + pathToUtf8(path));
     }
     out.flush();
-    if (!out) throw std::runtime_error("Unable to flush file: " + path.string());
+    if (!out) throw std::runtime_error("Unable to flush file: " + pathToUtf8(path));
     out.close();
-    if (!out) throw std::runtime_error("Unable to close file: " + path.string());
+    if (!out) throw std::runtime_error("Unable to close file: " + pathToUtf8(path));
     flushFileToDisk(path);
 }
 
@@ -213,7 +260,7 @@ static bool extensionIn(const std::filesystem::path& path, const std::vector<std
 }
 
 std::string canonicalTextureConflictStem(const std::filesystem::path& path) {
-    const std::string original = asciiLower(path.stem().string());
+    const std::string original = asciiLower(pathToUtf8(path.stem()));
     std::string canonical = original;
     trimAsciiSpaces(canonical);
     bool changed = true;
@@ -256,17 +303,17 @@ std::vector<std::filesystem::path> findConflictingTexturePaths(const std::filesy
         it.increment(iterationError);
     }
     if (iterationError) {
-        throw std::runtime_error("Unable to scan conflicting images in " + directory.string() + ": " + iterationError.message());
+        throw std::runtime_error("Unable to scan conflicting images in " + pathToUtf8(directory) + ": " + iterationError.message());
     }
 
     std::sort(matches.begin(), matches.end(), [&](const auto& left, const auto& right) {
         const bool leftCurrent = pathsReferToSameFile(left, currentPath);
         const bool rightCurrent = pathsReferToSameFile(right, currentPath);
         if (leftCurrent != rightCurrent) return leftCurrent;
-        const auto leftName = asciiLower(left.filename().string());
-        const auto rightName = asciiLower(right.filename().string());
+        const auto leftName = asciiLower(pathToUtf8(left.filename()));
+        const auto rightName = asciiLower(pathToUtf8(right.filename()));
         if (leftName != rightName) return leftName < rightName;
-        return left.filename().string() < right.filename().string();
+        return pathToUtf8(left.filename()) < pathToUtf8(right.filename());
     });
     return matches;
 }

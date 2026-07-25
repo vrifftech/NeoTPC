@@ -8,6 +8,10 @@
 namespace neotpc::texture {
 
 std::string asciiLower(std::string value);
+// Converts native Windows UTF-16 paths to UTF-8 instead of routing them
+// through the active ANSI code page. POSIX native path bytes are preserved.
+std::string pathToUtf8(const std::filesystem::path& path);
+std::string genericPathToUtf8(const std::filesystem::path& path);
 std::string extensionLower(const std::filesystem::path& path);
 // Whole-file reads are capped by the current parser memory budget.
 std::vector<std::uint8_t> readFileBytes(const std::filesystem::path& path);

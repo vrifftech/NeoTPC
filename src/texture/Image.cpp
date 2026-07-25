@@ -1562,7 +1562,8 @@ void commitTextureAndSidecar(const TextureData& texture,
     auto sidecar = output;
     if (writeSidecar) sidecar.replace_extension(".txi");
     const auto transaction = createTextureTransactionDirectory(parent);
-    const auto stagedImage = transaction / ("staged-image" + output.extension().string());
+    auto stagedImage = transaction / "staged-image";
+    stagedImage.replace_extension(output.extension());
     const auto stagedSidecar = transaction / "staged-sidecar.txi";
     const auto imageBackup = transaction / "backup-image";
     const auto sidecarBackup = transaction / "backup-sidecar";
@@ -1596,7 +1597,7 @@ void commitTextureAndSidecar(const TextureData& texture,
                 continue;
             }
             if (!std::filesystem::is_regular_file(replacement.target, ec) || ec) {
-                throw TextureError("Texture output target is not a replaceable regular file: " + replacement.target.string());
+                throw TextureError("Texture output target is not a replaceable regular file: " + pathToUtf8(replacement.target));
             }
             std::filesystem::rename(replacement.target, replacement.backup, ec);
             if (ec) throw TextureError("Unable to back up texture output before replacement: " + ec.message());
@@ -1627,7 +1628,7 @@ void commitTextureAndSidecar(const TextureData& texture,
         if (!restorationFailed) removePathNoThrow(transaction);
         if (restorationFailed) {
             throw TextureError("Texture save failed and one or more original files could not be restored; rollback data remains in " +
-                               transaction.string());
+                               pathToUtf8(transaction));
         }
         std::rethrow_exception(originalError);
     }
@@ -3381,7 +3382,7 @@ void saveTexture(const TextureData& texture, const std::filesystem::path& output
 
 std::string textureSummary(const TextureData& texture) {
     std::ostringstream out;
-    out << "Texture resource: " << texture.sourcePath.filename().string() << '\n'
+    out << "Texture resource: " << pathToUtf8(texture.sourcePath.filename()) << '\n'
         << "container: " << textureFileKindToString(texture.kind) << '\n'
         << "source encoding: " << texture.sourceEncoding << '\n';
     if (texture.hasPixels()) {
