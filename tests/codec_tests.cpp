@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -255,6 +256,195 @@ void testCompressedCodecs(const fs::path& root) {
     neotpc::texture::saveTexture(opaque, dxt1, options);
     const auto decoded = neotpc::texture::loadTexture(dxt1);
     require(meanSquaredError(opaque.layers.front(), decoded.layers.front(), false) < 1100.0, "DDS DXT1 error is too high");
+}
+
+void testTpcTxiEditingAndPairs(const fs::path& root) {
+    auto source = gradient(true);
+    source.txi = "downsamplemax 0\ndownsamplemin 0\n";
+
+    neotpc::texture::TextureSaveOptions options;
+    options.compression = neotpc::texture::TextureCompression::Dxt5;
+    options.generateMipmaps = true;
+    options.dxtQuality = neotpc::texture::DxtCompressionQuality::High;
+
+    const auto tpc = root / "editable-embedded.tpc";
+    neotpc::texture::saveTexture(source, tpc, options);
+    const auto beforeTexture = neotpc::texture::loadTexture(tpc);
+    const auto beforeBytes = neotpc::texture::readFileBytes(tpc);
+    require(beforeBytes.size() >= beforeTexture.txi.size(),
+            "TPC TXI footer is larger than its container");
+    const std::size_t payloadEnd = beforeBytes.size() - beforeTexture.txi.size();
+
+    const std::string replacement =
+        "envmaptexture CM_Baremetal\n"
+        "blending additive\n";
+    neotpc::texture::replaceTpcEmbeddedTxi(tpc, replacement);
+    const auto replacedBytes = neotpc::texture::readFileBytes(tpc);
+    require(replacedBytes.size() >= payloadEnd,
+            "embedded TXI replacement truncated the TPC payload");
+    require(std::equal(beforeBytes.begin(),
+                       beforeBytes.begin() + static_cast<std::ptrdiff_t>(payloadEnd),
+                       replacedBytes.begin()),
+            "embedded TXI replacement changed encoded TPC bytes");
+    const auto replacedTexture = neotpc::texture::loadTexture(tpc);
+    require(neotpc::texture::getTxiValue(replacedTexture.txi, "envmaptexture") ==
+                std::optional<std::string>("CM_Baremetal"),
+            "embedded TXI replacement did not persist envmaptexture");
+    require(neotpc::texture::getTxiValue(replacedTexture.txi, "blending") ==
+                std::optional<std::string>("additive"),
+            "embedded TXI replacement did not persist blending");
+
+    const auto stableBytes = replacedBytes;
+    bool rejected = false;
+    try {
+        neotpc::texture::replaceTpcEmbeddedTxi(
+            tpc,
+            "proceduretype cycle\n"
+            "numx 2\n"
+            "numy 2\n"
+            "defaultwidth 12\n"
+            "defaultheight 10\n"
+            "fps 8\n");
+    } catch (const std::exception&) {
+        rejected = true;
+    }
+    require(rejected, "incompatible animation TXI was accepted for an existing TPC payload");
+    require(neotpc::texture::readFileBytes(tpc) == stableBytes,
+            "failed embedded TXI replacement changed the original TPC");
+
+    const auto split = neotpc::texture::splitTpcToTgaTxi(
+        tpc, root / "editable-split.tga");
+    require(fs::is_regular_file(split.tga) && fs::is_regular_file(split.txi),
+            "TPC split did not create both TGA and TXI files");
+    const auto splitTxiBytes = neotpc::texture::readFileBytes(split.txi);
+    require(std::string(splitTxiBytes.begin(), splitTxiBytes.end()) == replacedTexture.txi,
+            "TPC split changed the TXI sidecar text");
+    const auto splitTexture = neotpc::texture::loadTexture(split.tga);
+    require(splitTexture.layers.size() == replacedTexture.layers.size(),
+            "TPC split changed the layer count");
+    for (std::size_t layer = 0; layer < splitTexture.layers.size(); ++layer) {
+        require(splitTexture.layers[layer].width == replacedTexture.layers[layer].width &&
+                    splitTexture.layers[layer].height == replacedTexture.layers[layer].height &&
+                    splitTexture.layers[layer].rgba == replacedTexture.layers[layer].rgba,
+                "TPC split changed decoded base-level pixels");
+    }
+
+    const auto combined = root / "editable-combined.tpc";
+    neotpc::texture::combineTgaTxiToTpc(split.tga, std::nullopt, combined, options);
+    const auto combinedTexture = neotpc::texture::loadTexture(combined);
+    require(combinedTexture.canvasWidth == splitTexture.canvasWidth &&
+                combinedTexture.canvasHeight == splitTexture.canvasHeight,
+            "TGA/TXI combine changed canvas dimensions");
+    require(combinedTexture.txi == splitTexture.txi,
+            "TGA/TXI combine changed TXI metadata");
+    require(meanSquaredError(splitTexture.layers.front(), combinedTexture.layers.front(), true) < 1500.0,
+            "TGA/TXI combine DXT5 error is too high");
+
+    auto noMetadata = gradient(true);
+    noMetadata.txi.clear();
+    const auto emptyPair = neotpc::texture::saveTgaTxiPair(
+        noMetadata, root / "empty-metadata.tga");
+    require(fs::is_regular_file(emptyPair.txi) && fs::file_size(emptyPair.txi) == 0,
+            "explicit TGA/TXI split did not create an empty TXI sidecar");
+
+    auto animationCanvas = gradient(true);
+    animationCanvas.txi.clear();
+    const auto animationTga = root / "animation-canvas.tga";
+    neotpc::texture::saveTexture(animationCanvas, animationTga);
+    const auto animationTxi = root / "animation-layout.txi";
+    const std::string animationLayout =
+        "proceduretype cycle\n"
+        "numx 2\n"
+        "numy 1\n"
+        "defaultwidth 12\n"
+        "defaultheight 20\n"
+        "fps 8\n";
+    neotpc::texture::writeFileBytes(
+        animationTxi,
+        std::vector<std::uint8_t>(animationLayout.begin(), animationLayout.end()));
+    const auto animationTpc = root / "animation-combined.tpc";
+    neotpc::texture::combineTgaTxiToTpc(
+        animationTga, animationTxi, animationTpc, options);
+    const auto animation = neotpc::texture::loadTexture(animationTpc);
+    require(animation.animated && animation.layers.size() == 2,
+            "explicit TXI was not applied before TGA animation layout inference");
+    require(animation.layers[0].width == 12 && animation.layers[0].height == 20,
+            "combined animation frame dimensions are wrong");
+
+    auto verifyFooterOnlyUpdate = [&](const std::string& name,
+                                      neotpc::texture::TextureData candidate,
+                                      neotpc::texture::TextureSaveOptions candidateOptions) {
+        candidate.txi = neotpc::texture::setTxiValue(candidate.txi, "downsamplemax", "0");
+        const auto path = root / ("footer-" + name + ".tpc");
+        neotpc::texture::saveTexture(candidate, path, candidateOptions);
+        const auto loadedBefore = neotpc::texture::loadTexture(path);
+        const auto bytesBefore = neotpc::texture::readFileBytes(path);
+        require(bytesBefore.size() >= loadedBefore.txi.size(),
+                name + " TPC has an invalid TXI footer size");
+        const auto prefixSize = bytesBefore.size() - loadedBefore.txi.size();
+        const auto layerCount = loadedBefore.layers.size();
+        std::vector<std::size_t> mipCounts;
+        mipCounts.reserve(layerCount);
+        for (const auto& layer : loadedBefore.layers) mipCounts.push_back(layer.mipmaps.size());
+
+        const auto updatedTxi = neotpc::texture::setTxiValue(
+            loadedBefore.txi, "downsamplemax", "1");
+        neotpc::texture::replaceTpcEmbeddedTxi(path, updatedTxi);
+        const auto bytesAfter = neotpc::texture::readFileBytes(path);
+        require(bytesAfter.size() >= prefixSize,
+                name + " TXI replacement truncated the TPC");
+        require(std::equal(bytesBefore.begin(),
+                           bytesBefore.begin() + static_cast<std::ptrdiff_t>(prefixSize),
+                           bytesAfter.begin()),
+                name + " TXI replacement changed encoded image bytes");
+
+        const auto loadedAfter = neotpc::texture::loadTexture(path);
+        require(loadedAfter.layers.size() == layerCount,
+                name + " TXI replacement changed the layer count");
+        for (std::size_t layer = 0; layer < layerCount; ++layer) {
+            require(loadedAfter.layers[layer].mipmaps.size() == mipCounts[layer],
+                    name + " TXI replacement changed a mipmap count");
+        }
+        require(neotpc::texture::getTxiValue(loadedAfter.txi, "downsamplemax") ==
+                    std::optional<std::string>("1"),
+                name + " TXI replacement did not persist the new value");
+    };
+
+    auto rawOptions = options;
+    rawOptions.compression = neotpc::texture::TextureCompression::None;
+    verifyFooterOnlyUpdate("raw", mipTexture(), rawOptions);
+
+    auto grayOptions = options;
+    grayOptions.compression = neotpc::texture::TextureCompression::Gray;
+    grayOptions.generateMipmaps = false;
+    verifyFooterOnlyUpdate("gray", mipTexture(), grayOptions);
+
+    auto swizzledOptions = options;
+    swizzledOptions.compression = neotpc::texture::TextureCompression::SwizzledBgra;
+    verifyFooterOnlyUpdate("swizzled", mipTexture(), swizzledOptions);
+
+    auto cubeOptions = options;
+    cubeOptions.compression = neotpc::texture::TextureCompression::Dxt5;
+    verifyFooterOnlyUpdate("cube", mipTexture(6), cubeOptions);
+
+    neotpc::texture::TextureData animated;
+    animated.kind = neotpc::texture::TextureFileKind::Tga;
+    animated.canvasWidth = 16;
+    animated.canvasHeight = 16;
+    animated.hasAlpha = true;
+    animated.animated = true;
+    animated.txi =
+        "proceduretype cycle\n"
+        "numx 2\n"
+        "numy 2\n"
+        "defaultwidth 8\n"
+        "defaultheight 8\n"
+        "fps 8\n";
+    animated.layers.push_back(solidLayer(8, 8, {255, 0, 0, 255}));
+    animated.layers.push_back(solidLayer(8, 8, {0, 255, 0, 255}));
+    animated.layers.push_back(solidLayer(8, 8, {0, 0, 255, 255}));
+    animated.layers.push_back(solidLayer(8, 8, {255, 255, 0, 255}));
+    verifyFooterOnlyUpdate("animation", std::move(animated), options);
 }
 
 void testMipmapsAndSwizzledTpc(const fs::path& root) {
@@ -651,6 +841,69 @@ void testTxi() {
     require(std::none_of(nulIssues.begin(), nulIssues.end(),
                          [](const auto& issue) { return issue.severity == neotpc::texture::TxiIssueSeverity::Error; }),
             "NUL-padded embedded TXI did not validate");
+
+    const auto directiveCompletion = neotpc::texture::txiAutocomplete("bl");
+    require(directiveCompletion.kind == neotpc::texture::TxiAutocompleteKind::Directive &&
+                directiveCompletion.replacementLength == 2 &&
+                std::find(directiveCompletion.suggestions.begin(), directiveCompletion.suggestions.end(),
+                          "blending") != directiveCompletion.suggestions.end(),
+            "TXI directive autocomplete did not use the catalog");
+    require(std::find(directiveCompletion.suggestions.begin(), directiveCompletion.suggestions.end(),
+                      "additive") == directiveCompletion.suggestions.end(),
+            "TXI directive autocomplete exposed a value token as a standalone key");
+
+    const auto enumCompletion = neotpc::texture::txiAutocomplete("blending pu");
+    require(enumCompletion.kind == neotpc::texture::TxiAutocompleteKind::Value &&
+                enumCompletion.directive == "blending" &&
+                enumCompletion.replacementLength == 2 &&
+                enumCompletion.suggestions == std::vector<std::string>{"punchthrough"},
+            "TXI enum value autocomplete did not filter allowed values");
+
+    const auto procedureCompletion = neotpc::texture::txiAutocomplete("proceduretype ");
+    require(std::find(procedureCompletion.suggestions.begin(), procedureCompletion.suggestions.end(),
+                      "cycle") != procedureCompletion.suggestions.end() &&
+                std::find(procedureCompletion.suggestions.begin(), procedureCompletion.suggestions.end(),
+                          "water") != procedureCompletion.suggestions.end(),
+            "TXI proceduretype autocomplete omitted indexed values");
+
+    const auto bumpCompletion = neotpc::texture::txiAutocomplete("isbumpmap ");
+    require(bumpCompletion.suggestions == std::vector<std::string>({"0", "1", "2"}),
+            "TXI isbumpmap autocomplete omitted the authored-normal value");
+
+    const auto numericDefaultCompletion = neotpc::texture::txiAutocomplete("fps ");
+    require(numericDefaultCompletion.suggestions == std::vector<std::string>{"1.0"},
+            "TXI autocomplete did not expose a numeric catalog default");
+
+    const auto allDirectives = neotpc::texture::txiAutocomplete("   ", true);
+    require(allDirectives.kind == neotpc::texture::TxiAutocompleteKind::Directive &&
+                allDirectives.replacementLength == 0 &&
+                allDirectives.suggestions.size() > 20,
+            "explicit TXI autocomplete did not list the directive index");
+
+    std::vector<std::string> indexedDirectives;
+    for (const auto& directive : neotpc::texture::txiDirectiveCatalog()) {
+        if (directive.valueKind != neotpc::texture::TxiDirectiveValueKind::ValueToken) {
+            indexedDirectives.push_back(directive.name);
+        }
+        if (directive.valueKind == neotpc::texture::TxiDirectiveValueKind::Enum) {
+            auto expected = directive.allowedValues;
+            std::sort(expected.begin(), expected.end());
+            expected.erase(std::unique(expected.begin(), expected.end()), expected.end());
+            require(neotpc::texture::txiAutocomplete(directive.name + " ").suggestions == expected,
+                    "TXI enum autocomplete drifted from the directive catalog for " + directive.name);
+        }
+    }
+    std::sort(indexedDirectives.begin(), indexedDirectives.end());
+    indexedDirectives.erase(std::unique(indexedDirectives.begin(), indexedDirectives.end()),
+                            indexedDirectives.end());
+    require(allDirectives.suggestions == indexedDirectives,
+            "TXI directive autocomplete drifted from the searchable catalog");
+    require(neotpc::texture::txiAutocomplete("# blend", true).suggestions.empty(),
+            "TXI autocomplete offered suggestions inside a comment");
+    require(neotpc::texture::txiDirectiveHint("blending").find("punchthrough") != std::string::npos,
+            "TXI autocomplete hint omitted indexed enum values");
+    require(neotpc::texture::txiValueHint("blending", "punchthrough").find("cutout") != std::string::npos,
+            "TXI autocomplete value hint did not use the indexed value description");
 }
 
 void testFixtures() {
@@ -801,17 +1054,71 @@ void testDocument(const fs::path& root) {
     document.open(source);
     require(document.isOpen() && !document.dirty(), "document did not open cleanly");
     document.invertAlpha();
-    require(document.dirty(), "pixel edit did not dirty the document");
+    require(document.dirty() && document.contentDirty(),
+            "pixel edit did not mark document content dirty");
 
     const auto output = root / "document-output.png";
     document.saveAs(output);
     require(document.path() == output && !document.dirty(), "save-as did not reset document state");
     document.setTxi("blending additive\n");
-    require(document.dirty(), "TXI edit did not dirty the document");
+    require(document.dirty() && document.txiDirty(), "TXI edit did not mark TXI state dirty");
     document.save();
     require(!document.dirty(), "save did not reset document state");
     document.close();
     require(!document.isOpen(), "document did not close");
+
+    auto tpcSource = gradient(true);
+    tpcSource.txi = "downsamplemax 0\nblending additive\n";
+    neotpc::texture::TextureSaveOptions tpcOptions;
+    tpcOptions.compression = neotpc::texture::TextureCompression::Dxt5;
+    tpcOptions.generateMipmaps = true;
+    const auto tpc = root / "document-embedded.tpc";
+    neotpc::texture::saveTexture(tpcSource, tpc, tpcOptions);
+
+    document.open(tpc);
+    const auto beforeTexture = document.texture();
+    const auto beforeBytes = neotpc::texture::readFileBytes(tpc);
+    require(beforeBytes.size() >= beforeTexture.txi.size(),
+            "document TPC has an invalid TXI footer size");
+    const auto payloadEnd = beforeBytes.size() - beforeTexture.txi.size();
+
+    auto equivalentLineEndings = beforeTexture.txi;
+    equivalentLineEndings.erase(
+        std::remove(equivalentLineEndings.begin(), equivalentLineEndings.end(), '\r'),
+        equivalentLineEndings.end());
+    document.setTxi(equivalentLineEndings);
+    require(!document.dirty(), "line-ending-only TXI edit dirtied the document");
+
+    document.setTxi(neotpc::texture::setTxiValue(
+        document.texture().txi, "blending", "punchthrough"));
+    require(document.txiDirty() && document.canPatchEmbeddedTxi(),
+            "TXI-only TPC edit was not eligible for footer replacement");
+    require(document.summary().find("replace embedded TXI only") != std::string::npos,
+            "document summary did not identify the footer-only save path");
+
+    auto changedOptions = document.saveOptions();
+    changedOptions.bicubicMipmaps = !changedOptions.bicubicMipmaps;
+    document.setSaveOptions(changedOptions);
+    require(document.optionsDirty() && !document.canPatchEmbeddedTxi(),
+            "save-option edit did not disable footer-only replacement");
+    changedOptions.bicubicMipmaps = !changedOptions.bicubicMipmaps;
+    document.setSaveOptions(changedOptions);
+    require(!document.optionsDirty() && document.canPatchEmbeddedTxi(),
+            "reverting save options did not restore footer-only replacement");
+
+    document.save();
+    require(!document.dirty(), "footer-only document save did not reset dirty state");
+    const auto afterBytes = neotpc::texture::readFileBytes(tpc);
+    require(afterBytes.size() >= payloadEnd,
+            "footer-only document save truncated the TPC");
+    require(std::equal(beforeBytes.begin(),
+                       beforeBytes.begin() + static_cast<std::ptrdiff_t>(payloadEnd),
+                       afterBytes.begin()),
+            "footer-only document save changed encoded TPC bytes");
+    const auto savedTpc = neotpc::texture::loadTexture(tpc);
+    require(neotpc::texture::getTxiValue(savedTpc.txi, "blending") ==
+                std::optional<std::string>("punchthrough"),
+            "footer-only document save did not persist TXI metadata");
 }
 
 void testMalformedInput(const fs::path& root) {
@@ -941,6 +1248,7 @@ int main() {
     try {
         testLosslessCodecs(temp.path);
         testCompressedCodecs(temp.path);
+        testTpcTxiEditingAndPairs(temp.path);
         testMipmapsAndSwizzledTpc(temp.path);
         testDdsVariantsAndCubemaps(temp.path);
         testTxbInput(temp.path);

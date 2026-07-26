@@ -2,6 +2,7 @@
 #include "EncodingOptionsPanel.hpp"
 #include "PathUtils.hpp"
 #include "TextureCanvas.hpp"
+#include "TxiEditor.hpp"
 #include "core/TextureDocument.hpp"
 #include "texture/FileUtil.hpp"
 #include "texture/ParserLimits.hpp"
@@ -54,6 +55,10 @@ constexpr const char* kAppName = "NeoTPC";
 enum : int {
     ID_SAVE_AS = wxID_HIGHEST + 710,
     ID_CLOSE_TEXTURE,
+    ID_SPLIT_TPC,
+    ID_COMBINE_TGA_TXI,
+    ID_IMPORT_TXI,
+    ID_EXPORT_TXI,
     ID_BATCH_CONVERT,
     ID_OPEN_CONFLICTS,
     ID_CLOSE_CONFLICTS,
@@ -162,6 +167,30 @@ struct ComparisonImage {
     wxStaticText* label = nullptr;
 };
 
+class TpcEncodingDialog final : public wxDialog {
+public:
+    TpcEncodingDialog(wxWindow* parent,
+                      const neotpc::texture::TextureSaveOptions& initialOptions)
+        : wxDialog(parent, wxID_ANY, "TPC encoding options", wxDefaultPosition, wxDefaultSize,
+                   wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER) {
+        auto* root = new wxBoxSizer(wxVERTICAL);
+        optionsPanel_ = new EncodingOptionsPanel(this);
+        optionsPanel_->setOptions(initialOptions);
+        root->Add(optionsPanel_, 1, wxEXPAND | wxALL, FromDIP(10));
+        root->Add(CreateSeparatedButtonSizer(wxOK | wxCANCEL), 0,
+                  wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(10));
+        SetSizerAndFit(root);
+        SetMinSize(FromDIP(wxSize(440, 500)));
+    }
+
+    neotpc::texture::TextureSaveOptions options() const {
+        return optionsPanel_->options();
+    }
+
+private:
+    EncodingOptionsPanel* optionsPanel_ = nullptr;
+};
+
 class MainFrame;
 
 class TextureDropTarget final : public wxFileDropTarget {
@@ -188,6 +217,7 @@ public:
         Bind(wxEVT_CLOSE_WINDOW, &MainFrame::onCloseWindow, this);
         Bind(wxEVT_TIMER, &MainFrame::onAnimationTimer, this, ID_ANIMATION_TIMER);
         wxui::applyTheme(this, darkMode_);
+        txiEditor_->applyTheme(darkMode_);
         canvas_->setDarkMode(darkMode_);
         refreshCatalog();
         updateWindowState();
@@ -225,6 +255,12 @@ private:
         file->Append(ID_CLOSE_CONFLICTS, "Close Image Comparison");
         file->Append(wxID_SAVE, "&Save\tCtrl+S");
         file->Append(ID_SAVE_AS, "Save &As / Convert...\tCtrl+Shift+S");
+        file->AppendSeparator();
+        file->Append(ID_SPLIT_TPC, "Split TPC into TGA + TXI...");
+        file->Append(ID_COMBINE_TGA_TXI, "Combine TGA + TXI into TPC...");
+        file->AppendSeparator();
+        file->Append(ID_IMPORT_TXI, "Import TXI...");
+        file->Append(ID_EXPORT_TXI, "Export TXI...");
         file->AppendSeparator();
         file->Append(ID_BATCH_CONVERT, "&Batch Convert...");
         file->AppendSeparator();
@@ -270,6 +306,10 @@ private:
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { chooseOpen(); }, wxID_OPEN);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { save(); }, wxID_SAVE);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { saveAs(); }, ID_SAVE_AS);
+        Bind(wxEVT_MENU, [this](wxCommandEvent&) { splitTpc(); }, ID_SPLIT_TPC);
+        Bind(wxEVT_MENU, [this](wxCommandEvent&) { combineTgaTxi(); }, ID_COMBINE_TGA_TXI);
+        Bind(wxEVT_MENU, [this](wxCommandEvent&) { importTxi(); }, ID_IMPORT_TXI);
+        Bind(wxEVT_MENU, [this](wxCommandEvent&) { exportTxi(); }, ID_EXPORT_TXI);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { showBatch(); }, ID_BATCH_CONVERT);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { openConflictingImages(); }, ID_OPEN_CONFLICTS);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { closeImageComparison(); }, ID_CLOSE_CONFLICTS);
@@ -499,14 +539,22 @@ private:
     void buildTxiPage() {
         auto* page = new wxPanel(notebook_, wxID_ANY);
         auto* root = new wxBoxSizer(wxVERTICAL);
-        auto* help = new wxStaticText(page, wxID_ANY,
-            "TXI controls Odyssey material, animation, cube-map, font, and procedural behavior. It is embedded in "
-            "TPC output and written as a sidecar for other formats.");
-        help->Wrap(FromDIP(380));
-        root->Add(help, 0, wxEXPAND | wxALL, FromDIP(8));
-        txiEditor_ = new wxTextCtrl(page, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize,
-                                    wxTE_MULTILINE | wxTE_DONTWRAP | wxTE_RICH2);
+        txiHelp_ = new wxStaticText(page, wxID_ANY,
+            "TXI controls Odyssey material, animation, cube-map, font, and procedural behavior. Open a texture to "
+            "edit its embedded or sidecar metadata. Type a directive or press Ctrl+Space for TXI index suggestions.");
+        txiHelp_->Wrap(FromDIP(520));
+        root->Add(txiHelp_, 0, wxEXPAND | wxALL, FromDIP(8));
+        txiEditor_ = new TxiEditor(page);
         root->Add(txiEditor_, 1, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(8));
+        txiAutocompleteHint_ = new wxStaticText(
+            page, wxID_ANY, "Type a TXI directive or press Ctrl+Space for suggestions.");
+        txiAutocompleteHint_->Wrap(FromDIP(680));
+        root->Add(txiAutocompleteHint_, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(8));
+        auto* txiButtons = new wxBoxSizer(wxHORIZONTAL);
+        txiButtons->Add(new wxButton(page, ID_IMPORT_TXI, "Import TXI..."), 0, wxRIGHT, FromDIP(6));
+        txiButtons->Add(new wxButton(page, ID_EXPORT_TXI, "Export TXI..."));
+        txiButtons->AddStretchSpacer();
+        root->Add(txiButtons, 0, wxEXPAND | wxALL, FromDIP(8));
         txiSummary_ = new wxStaticText(page, wxID_ANY, "No TXI metadata");
         root->Add(txiSummary_, 0, wxEXPAND | wxALL, FromDIP(8));
         txiIssues_ = new wxListCtrl(page, wxID_ANY, wxDefaultPosition, FromDIP(wxSize(-1, 210)),
@@ -515,7 +563,15 @@ private:
         root->Add(txiIssues_, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(8));
         page->SetSizer(root);
         notebook_->AddPage(page, "TXI", false);
-        txiEditor_->Bind(wxEVT_TEXT, [this](wxCommandEvent&) { onTxiChanged(); });
+        txiEditor_->Bind(wxEVT_STC_CHANGE, [this](wxStyledTextEvent&) { onTxiChanged(); });
+        txiEditor_->setHintHandler([this](const wxString& hint) {
+            if (txiAutocompleteHint_ == nullptr) return;
+            txiAutocompleteHint_->SetLabel(hint);
+            txiAutocompleteHint_->Wrap(FromDIP(680));
+            txiAutocompleteHint_->GetParent()->Layout();
+        });
+        Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { importTxi(); }, ID_IMPORT_TXI);
+        Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { exportTxi(); }, ID_EXPORT_TXI);
         txiIssues_->Bind(wxEVT_LIST_ITEM_ACTIVATED, &MainFrame::onTxiIssueActivated, this);
     }
 
@@ -543,11 +599,15 @@ private:
         if (!document_.isOpen()) return false;
         if (neotpc::texture::extensionLower(document_.path()) == "txb") return saveAs();
         document_.setSaveOptions(optionsPanel_->options());
+        const bool patchedTxiOnly = document_.canPatchEmbeddedTxi();
         try {
             wxBusyCursor busy;
             document_.save();
             refreshDocumentUi();
-            wxui::setStatusText(*this, wxString("Saved ") + wxpath::toWx(document_.path()), 0);
+            wxui::setStatusText(*this,
+                (patchedTxiOnly ? wxString("Updated embedded TXI in ") : wxString("Saved ")) +
+                    wxpath::toWx(document_.path()),
+                0);
             return true;
         } catch (const std::exception& error) {
             wxui::showError(this, error);
@@ -584,6 +644,136 @@ private:
         } catch (const std::exception& error) {
             wxui::showError(this, error);
             return false;
+        }
+    }
+
+    void splitTpc() {
+        if (!document_.isOpen() || document_.texture().kind != neotpc::texture::TextureFileKind::Tpc ||
+            !document_.texture().hasPixels()) {
+            return;
+        }
+
+        auto suggested = document_.path().filename();
+        suggested.replace_extension(".tga");
+        wxFileDialog dialog(this, "Split TPC into TGA + TXI", wxpath::toWx(document_.path().parent_path()),
+                            wxpath::toWx(suggested), "Targa image (*.tga)|*.tga",
+                            wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
+        if (dialog.ShowModal() != wxID_OK) return;
+        auto outputTga = wxpath::fromWx(dialog.GetPath());
+        if (outputTga.extension().empty()) outputTga.replace_extension(".tga");
+        auto outputTxi = outputTga;
+        outputTxi.replace_extension(".txi");
+
+        std::error_code ec;
+        if (fs::exists(outputTxi, ec) &&
+            !wxui::confirm(this, "Replace TXI sidecar",
+                           "The matching TXI file already exists. Replace both output files?")) {
+            return;
+        }
+
+        try {
+            wxBusyCursor busy;
+            const auto pair = neotpc::texture::saveTgaTxiPair(document_.texture(), outputTga);
+            wxui::setStatusText(*this,
+                wxString("Split to ") + wxpath::toWx(pair.tga.filename()) + " + " +
+                    wxpath::toWx(pair.txi.filename()),
+                0);
+        } catch (const std::exception& error) {
+            wxui::showError(this, error);
+        }
+    }
+
+    void combineTgaTxi() {
+        wxFileDialog tgaDialog(this, "Select TGA image", wxEmptyString, wxEmptyString,
+                               "Targa image (*.tga)|*.tga", wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+        if (tgaDialog.ShowModal() != wxID_OK) return;
+        const auto inputTga = wxpath::fromWx(tgaDialog.GetPath());
+
+        std::optional<fs::path> inputTxi;
+        auto matchingTxi = inputTga;
+        matchingTxi.replace_extension(".txi");
+        std::error_code ec;
+        if (fs::is_regular_file(matchingTxi, ec)) {
+            inputTxi = matchingTxi;
+        } else {
+            wxMessageDialog choice(this,
+                "No same-name TXI sidecar was found.\n\nChoose Yes to select another TXI file, "
+                "No to combine the TGA without TXI metadata, or Cancel to stop.",
+                "Combine TGA + TXI", wxYES_NO | wxCANCEL | wxICON_QUESTION);
+            const int result = choice.ShowModal();
+            if (result == wxID_CANCEL) return;
+            if (result == wxID_YES) {
+                wxFileDialog txiDialog(this, "Select TXI metadata", wxpath::toWx(inputTga.parent_path()),
+                                       wxEmptyString, "TXI metadata (*.txi)|*.txi",
+                                       wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+                if (txiDialog.ShowModal() != wxID_OK) return;
+                inputTxi = wxpath::fromWx(txiDialog.GetPath());
+            }
+        }
+
+        auto suggested = inputTga.filename();
+        suggested.replace_extension(".tpc");
+        wxFileDialog outputDialog(this, "Save combined TPC", wxpath::toWx(inputTga.parent_path()),
+                                  wxpath::toWx(suggested), "TPC texture (*.tpc)|*.tpc",
+                                  wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
+        if (outputDialog.ShowModal() != wxID_OK) return;
+        auto outputTpc = wxpath::fromWx(outputDialog.GetPath());
+        if (outputTpc.extension().empty()) outputTpc.replace_extension(".tpc");
+
+        neotpc::texture::TextureSaveOptions initialOptions;
+        if (document_.isOpen()) initialOptions = document_.saveOptions();
+        TpcEncodingDialog optionsDialog(this, initialOptions);
+        wxui::applyTheme(&optionsDialog, darkMode_);
+        if (optionsDialog.ShowModal() != wxID_OK) return;
+
+        try {
+            wxBusyCursor busy;
+            neotpc::texture::combineTgaTxiToTpc(
+                inputTga, inputTxi, outputTpc, optionsDialog.options());
+            settings_.addRecentFile(outputTpc);
+            refreshRecentFiles();
+            wxui::setStatusText(*this, wxString("Combined TGA + TXI into ") + wxpath::toWx(outputTpc), 0);
+        } catch (const std::exception& error) {
+            wxui::showError(this, error);
+        }
+    }
+
+    void importTxi() {
+        if (!document_.isOpen()) return;
+        wxFileDialog dialog(this, "Import TXI metadata", wxpath::toWx(document_.path().parent_path()),
+                            wxEmptyString, "TXI metadata (*.txi)|*.txi",
+                            wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+        if (dialog.ShowModal() != wxID_OK) return;
+        try {
+            const auto imported = neotpc::texture::loadTexture(wxpath::fromWx(dialog.GetPath()));
+            document_.setTxi(imported.txi);
+            loading_ = true;
+            txiEditor_->setValue(wxui::toWx(document_.texture().txi));
+            loading_ = false;
+            summary_->ChangeValue(wxui::toWx(document_.summary()));
+            refreshTxiValidation();
+            updateWindowState();
+            wxui::setStatusText(*this, "Imported TXI metadata", 0);
+        } catch (const std::exception& error) {
+            wxui::showError(this, error);
+        }
+    }
+
+    void exportTxi() {
+        if (!document_.isOpen()) return;
+        auto suggested = document_.path().filename();
+        suggested.replace_extension(".txi");
+        wxFileDialog dialog(this, "Export TXI metadata", wxpath::toWx(document_.path().parent_path()),
+                            wxpath::toWx(suggested), "TXI metadata (*.txi)|*.txi",
+                            wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
+        if (dialog.ShowModal() != wxID_OK) return;
+        auto output = wxpath::fromWx(dialog.GetPath());
+        if (output.extension().empty()) output.replace_extension(".txi");
+        try {
+            neotpc::texture::saveTexture(document_.texture(), output);
+            wxui::setStatusText(*this, wxString("Exported TXI to ") + wxpath::toWx(output), 0);
+        } catch (const std::exception& error) {
+            wxui::showError(this, error);
         }
     }
 
@@ -751,9 +941,13 @@ private:
         mipChoice_->Clear();
         if (!document_.isOpen()) {
             summary_->ChangeValue(wxEmptyString);
-            txiEditor_->ChangeValue(wxEmptyString);
+            txiEditor_->setValue(wxEmptyString);
             txiIssues_->DeleteAllItems();
             txiSummary_->SetLabel("No TXI metadata");
+            txiHelp_->SetLabel(
+                "TXI controls Odyssey material, animation, cube-map, font, and procedural behavior. Open a texture "
+                "to edit its embedded or sidecar metadata. Type a directive or press Ctrl+Space for TXI index suggestions.");
+            txiHelp_->Wrap(FromDIP(380));
             canvas_->clearImage("Open or drop a texture to begin");
             playButton_->Enable(false);
             playButton_->Show(false);
@@ -785,7 +979,18 @@ private:
         playButton_->Show(playable);
         refreshMipmapChoices();
         optionsPanel_->setOptions(document_.saveOptions());
-        txiEditor_->ChangeValue(wxui::toWx(texture.txi));
+        if (texture.kind == neotpc::texture::TextureFileKind::Tpc) {
+            txiHelp_->SetLabel(
+                "This TXI is embedded in the TPC. Edit it here and use Save. Type a directive or press Ctrl+Space "
+                "for TXI index suggestions. When TXI is the only change, NeoTPC replaces only the metadata footer "
+                "and preserves the encoded image and mipmaps byte-for-byte.");
+        } else {
+            txiHelp_->SetLabel(
+                "This metadata is stored in a same-name TXI sidecar when the image format does not embed TXI. "
+                "Type a directive or press Ctrl+Space for TXI index suggestions. Save or convert the texture to write it.");
+        }
+        txiHelp_->Wrap(FromDIP(380));
+        txiEditor_->setValue(wxui::toWx(texture.txi));
         summary_->ChangeValue(wxui::toWx(document_.summary()));
         loading_ = false;
         refreshTxiValidation();
@@ -923,7 +1128,7 @@ private:
 
     void onTxiChanged() {
         if (loading_ || !document_.isOpen()) return;
-        document_.setTxi(wxui::toStd(txiEditor_->GetValue()));
+        document_.setTxi(wxui::toStd(txiEditor_->value()));
         summary_->ChangeValue(wxui::toWx(document_.summary()));
         refreshTxiValidation();
         updateWindowState();
@@ -933,12 +1138,7 @@ private:
         const wxString lineText = txiIssues_->GetItemText(event.GetIndex(), 1);
         long line = 0;
         if (!lineText.ToLong(&line) || line < 1) return;
-        const long position = txiEditor_->XYToPosition(0, line - 1);
-        if (position != wxNOT_FOUND) {
-            txiEditor_->SetInsertionPoint(position);
-            txiEditor_->ShowPosition(position);
-            txiEditor_->SetFocus();
-        }
+        txiEditor_->goToOneBasedLine(static_cast<std::size_t>(line));
     }
 
     void updateWindowState() {
@@ -951,9 +1151,17 @@ private:
         }
         if (document_.dirty()) name += " *";
         SetTitle(name + " - NeoTPC");
-        for (int id : {ID_SAVE_AS, ID_CLOSE_TEXTURE, ID_OPEN_CONFLICTS}) GetMenuBar()->Enable(id, open);
+        for (int id : {ID_SAVE_AS, ID_CLOSE_TEXTURE, ID_OPEN_CONFLICTS, ID_IMPORT_TXI, ID_EXPORT_TXI}) {
+            GetMenuBar()->Enable(id, open);
+        }
+        GetMenuBar()->Enable(ID_SPLIT_TPC,
+            open && pixels && document_.texture().kind == neotpc::texture::TextureFileKind::Tpc);
+        GetMenuBar()->Enable(ID_COMBINE_TGA_TXI, true);
         GetMenuBar()->Enable(ID_CLOSE_CONFLICTS, !comparisonImages_.empty());
         GetMenuBar()->Enable(wxID_SAVE, open && document_.dirty());
+        if (txiEditor_ != nullptr) txiEditor_->Enable(open);
+        if (auto* importButton = FindWindow(ID_IMPORT_TXI)) importButton->Enable(open);
+        if (auto* exportButton = FindWindow(ID_EXPORT_TXI)) exportButton->Enable(open);
         if (conflictButton_ != nullptr) conflictButton_->Enable(open);
         for (int id : {ID_FIT_IMAGE, ID_ACTUAL_SIZE, ID_ZOOM_IN, ID_ZOOM_OUT,
                        ID_SET_ALPHA, ID_SCALE_ALPHA, ID_INVERT_ALPHA, ID_FLIP_HORIZONTAL, ID_FLIP_VERTICAL}) {
@@ -1043,6 +1251,7 @@ private:
         darkMode_ = event.IsChecked();
         wxui::writeDarkMode(kAppName, darkMode_);
         wxui::applyTheme(this, darkMode_);
+        txiEditor_->applyTheme(darkMode_);
         applyToPreviewCanvases([this](auto& canvas) { canvas.setDarkMode(darkMode_); });
     }
 
@@ -1083,7 +1292,9 @@ private:
     wxButton* conflictButton_ = nullptr;
     wxTextCtrl* summary_ = nullptr;
     EncodingOptionsPanel* optionsPanel_ = nullptr;
-    wxTextCtrl* txiEditor_ = nullptr;
+    wxStaticText* txiHelp_ = nullptr;
+    TxiEditor* txiEditor_ = nullptr;
+    wxStaticText* txiAutocompleteHint_ = nullptr;
     wxStaticText* txiSummary_ = nullptr;
     wxListCtrl* txiIssues_ = nullptr;
     wxTextCtrl* catalogFilter_ = nullptr;

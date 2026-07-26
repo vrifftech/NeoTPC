@@ -135,11 +135,15 @@ option(NEOTPC_REQUIRE_WX_GUI "Fail configure if wxWidgets is unavailable while N
 function(neotpc_link_wx target_name)
     target_compile_definitions(${target_name} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
     set(_wx_targets)
-    foreach(_wx_target IN ITEMS wx::core wx::base wx::adv wxWidgets::wxWidgets)
-        if(TARGET ${_wx_target})
-            list(APPEND _wx_targets ${_wx_target})
-        endif()
-    endforeach()
+    if(TARGET wx::core)
+        foreach(_wx_target IN ITEMS wx::core wx::base wx::adv wx::stc)
+            if(TARGET ${_wx_target})
+                list(APPEND _wx_targets ${_wx_target})
+            endif()
+        endforeach()
+    elseif(TARGET wxWidgets::wxWidgets)
+        list(APPEND _wx_targets wxWidgets::wxWidgets)
+    endif()
     if(_wx_targets)
         target_link_libraries(${target_name} PRIVATE ${_wx_targets})
     else()
@@ -154,7 +158,7 @@ function(neotpc_link_wx target_name)
 endfunction()
 
 if(NEOTPC_BUILD_WX_GUI)
-    set(NEOTPC_WX_COMPONENTS core base adv)
+    set(NEOTPC_WX_COMPONENTS core base adv stc)
 
     # CMake's Unix FindwxWidgets module searches wx-config only inside the
     # active find root. A vcpkg toolchain changes that root, which can hide
@@ -174,28 +178,23 @@ if(NEOTPC_BUILD_WX_GUI)
 
     if(WIN32)
         find_package(wxWidgets CONFIG QUIET COMPONENTS ${NEOTPC_WX_COMPONENTS})
-        if(NOT wxWidgets_FOUND AND NOT TARGET wx::core AND NOT TARGET wxWidgets::wxWidgets)
-            find_package(wxWidgets CONFIG QUIET)
-        endif()
-        if(NOT wxWidgets_FOUND AND NOT TARGET wx::core AND NOT TARGET wxWidgets::wxWidgets)
+        if(NOT wxWidgets_FOUND AND NOT TARGET wx::stc)
             find_package(wxWidgets QUIET MODULE COMPONENTS ${NEOTPC_WX_COMPONENTS})
         endif()
     else()
         find_package(wxWidgets QUIET MODULE COMPONENTS ${NEOTPC_WX_COMPONENTS})
-        if(NOT wxWidgets_FOUND AND NOT TARGET wx::core AND NOT TARGET wxWidgets::wxWidgets)
+        if(NOT wxWidgets_FOUND AND NOT TARGET wx::stc)
             find_package(wxWidgets CONFIG QUIET COMPONENTS ${NEOTPC_WX_COMPONENTS})
-        endif()
-        if(NOT wxWidgets_FOUND AND NOT TARGET wx::core AND NOT TARGET wxWidgets::wxWidgets)
-            find_package(wxWidgets CONFIG QUIET)
         endif()
     endif()
 
-    if(wxWidgets_FOUND OR TARGET wx::core OR TARGET wxWidgets::wxWidgets)
+    if(wxWidgets_FOUND OR (TARGET wx::core AND TARGET wx::stc))
         find_package(Threads REQUIRED)
         set(NEOTPC_WX_SOURCES
             src/wx/BatchDialog.cpp
             src/wx/EncodingOptionsPanel.cpp
             src/wx/TextureCanvas.cpp
+            src/wx/TxiEditor.cpp
             src/wx/main.cpp
         )
         if(WIN32)
@@ -231,8 +230,9 @@ if(NEOTPC_BUILD_WX_GUI)
         endif()
     elseif(NEOTPC_REQUIRE_WX_GUI)
         message(FATAL_ERROR
-            "wxWidgets was not found, but NEOTPC_REQUIRE_WX_GUI is ON. "
-            "On Debian or Ubuntu, install libwxgtk3.2-dev. On Windows, use the pinned wxWidgets 3.3.3 overlay from neoshared. When a toolchain "
+            "wxWidgets with the StyledTextCtrl component was not found, but "
+            "NEOTPC_REQUIRE_WX_GUI is ON. On Debian or Ubuntu, install "
+            "libwxgtk3.2-dev. On Windows, use the pinned wxWidgets 3.3.3 overlay from neoshared. When a toolchain "
             "hides host programs, configure with "
             "-DwxWidgets_CONFIG_EXECUTABLE=/usr/bin/wx-config.")
     else()

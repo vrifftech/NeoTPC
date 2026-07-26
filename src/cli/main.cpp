@@ -12,6 +12,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -129,6 +130,10 @@ void printUsage(std::ostream& out) {
         "Usage:\n"
         "  neotpc-cli info <texture>\n"
         "  neotpc-cli convert <input> <output> [options]\n"
+        "  neotpc-cli split <input.tpc> <output.tga>\n"
+        "  neotpc-cli combine <input.tga> <output.tpc> [options]\n"
+        "  neotpc-cli txi-export <texture> <output.txi>\n"
+        "  neotpc-cli txi-replace <input.tpc> <metadata.txi>\n"
         "  neotpc-cli batch <input-dir> <output-dir> --format <ext> [options]\n"
         "  neotpc-cli txi-validate <texture-or-txi>\n"
         "\n"
@@ -182,6 +187,85 @@ int commandConvert(const std::vector<std::string>& args) {
     return 0;
 }
 
+int commandSplit(const std::vector<std::string>& args) {
+    if (args.size() != 4) fail("split requires an input TPC and output TGA path");
+    const auto pair = neotpc::texture::splitTpcToTgaTxi(
+        fs::u8path(args[2]), fs::u8path(args[3]));
+    std::cout << "Split " << args[2] << " -> "
+              << neotpc::texture::pathToUtf8(pair.tga) << " + "
+              << neotpc::texture::pathToUtf8(pair.txi) << '\n';
+    return 0;
+}
+
+int commandCombine(const std::vector<std::string>& args) {
+    if (args.size() < 4) fail("combine requires an input TGA and output TPC path");
+    ConvertState state;
+    for (std::size_t index = 4; index < args.size(); ++index) {
+        if (!parseConvertOption(args, index, state)) fail("Unknown combine option: " + args[index]);
+    }
+
+    const auto input = fs::u8path(args[2]);
+    const auto output = fs::u8path(args[3]);
+    if (neotpc::texture::extensionLower(input) != "tga") {
+        fail("combine input must use the .tga extension");
+    }
+    if (neotpc::texture::extensionLower(output) != "tpc") {
+        fail("combine output must use the .tpc extension");
+    }
+
+    // Build the final TXI text before decoding the TGA so cube/animation
+    // directives are applied to the source canvas during layout inference.
+    std::string finalTxi;
+    if (state.txiFile) {
+        const auto txiBytes = neotpc::texture::readFileBytes(*state.txiFile);
+        finalTxi.assign(txiBytes.begin(), txiBytes.end());
+    } else {
+        auto sidecar = input;
+        sidecar.replace_extension(".txi");
+        std::error_code ec;
+        if (fs::is_regular_file(sidecar, ec)) {
+            const auto txiBytes = neotpc::texture::readFileBytes(sidecar);
+            finalTxi.assign(txiBytes.begin(), txiBytes.end());
+        }
+    }
+    for (const auto& entry : state.txiValues) {
+        finalTxi = neotpc::texture::setTxiValue(finalTxi, entry.first, entry.second);
+    }
+
+    const auto imageBytes = neotpc::texture::readFileBytes(input);
+    auto texture = neotpc::texture::loadTextureBytes(imageBytes, input, std::move(finalTxi));
+    if (texture.kind != neotpc::texture::TextureFileKind::Tga) {
+        fail("combine input is not a TGA image");
+    }
+    if (state.setAlpha) neotpc::texture::setTextureAlpha(texture, *state.setAlpha);
+    if (state.scaleAlpha) neotpc::texture::scaleTextureAlpha(texture, *state.scaleAlpha);
+    if (state.invertAlpha) neotpc::texture::invertTextureAlpha(texture);
+    neotpc::texture::saveTexture(texture, output, state.options);
+    std::cout << "Combined " << args[2] << " -> " << args[3] << '\n';
+    return 0;
+}
+
+int commandTxiExport(const std::vector<std::string>& args) {
+    if (args.size() != 4) fail("txi-export requires a texture and output TXI path");
+    const auto texture = neotpc::texture::loadTexture(fs::u8path(args[2]));
+    const auto output = fs::u8path(args[3]);
+    if (neotpc::texture::extensionLower(output) != "txi") {
+        fail("txi-export output must use the .txi extension");
+    }
+    neotpc::texture::saveTexture(texture, output);
+    std::cout << "Exported TXI " << args[2] << " -> " << args[3] << '\n';
+    return 0;
+}
+
+int commandTxiReplace(const std::vector<std::string>& args) {
+    if (args.size() != 4) fail("txi-replace requires a TPC and TXI path");
+    const auto txiBytes = neotpc::texture::readFileBytes(fs::u8path(args[3]));
+    neotpc::texture::replaceTpcEmbeddedTxi(
+        fs::u8path(args[2]), std::string(txiBytes.begin(), txiBytes.end()));
+    std::cout << "Replaced embedded TXI in " << args[2] << '\n';
+    return 0;
+}
+
 int commandBatch(const std::vector<std::string>& args) {
     if (args.size() < 4) fail("batch requires input and output directories");
     ConvertState state;
@@ -227,6 +311,10 @@ int run(const std::vector<std::string>& args) {
     }
     if (args[1] == "info") return commandInfo(args);
     if (args[1] == "convert") return commandConvert(args);
+    if (args[1] == "split") return commandSplit(args);
+    if (args[1] == "combine") return commandCombine(args);
+    if (args[1] == "txi-export") return commandTxiExport(args);
+    if (args[1] == "txi-replace") return commandTxiReplace(args);
     if (args[1] == "batch") return commandBatch(args);
     if (args[1] == "txi-validate") return commandValidate(args);
     fail("Unknown command: " + args[1]);

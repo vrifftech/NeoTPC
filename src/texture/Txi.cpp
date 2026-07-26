@@ -140,6 +140,58 @@ const std::map<std::string, std::string>& valueTokenParents() {
     return parents;
 }
 
+bool asciiStartsWith(const std::string& candidate, std::string_view prefix) {
+    if (prefix.size() > candidate.size()) return false;
+    for (std::size_t index = 0; index < prefix.size(); ++index) {
+        const unsigned char left = static_cast<unsigned char>(candidate[index]);
+        const unsigned char right = static_cast<unsigned char>(prefix[index]);
+        if (std::tolower(left) != std::tolower(right)) return false;
+    }
+    return true;
+}
+
+void sortAndUnique(std::vector<std::string>& values) {
+    std::sort(values.begin(), values.end());
+    values.erase(std::unique(values.begin(), values.end()), values.end());
+}
+
+std::vector<std::string> valueSuggestions(const TxiDirectiveInfo& directive) {
+    switch (directive.valueKind) {
+    case TxiDirectiveValueKind::Boolean:
+        return {"0", "1"};
+    case TxiDirectiveValueKind::BooleanOrInteger:
+        if (directive.name == "isbumpmap") return {"0", "1", "2"};
+        return {"0", "1"};
+    case TxiDirectiveValueKind::Enum:
+        return directive.allowedValues;
+    case TxiDirectiveValueKind::Integer:
+        if (parseIntStrict(directive.defaultValue)) {
+            return {trimTxi(directive.defaultValue)};
+        }
+        return {};
+    case TxiDirectiveValueKind::Float:
+        if (parseFloatStrict(directive.defaultValue)) {
+            return {trimTxi(directive.defaultValue)};
+        }
+        return {};
+    case TxiDirectiveValueKind::NumericList:
+        if (parseNumericList(directive.defaultValue)) {
+            return {trimTxi(directive.defaultValue)};
+        }
+        return {};
+    case TxiDirectiveValueKind::CoordinateBlockCount:
+        if (parseCoordinateCount(directive.defaultValue)) {
+            return {trimTxi(directive.defaultValue)};
+        }
+        return {};
+    case TxiDirectiveValueKind::ResRef:
+    case TxiDirectiveValueKind::FreeText:
+    case TxiDirectiveValueKind::ValueToken:
+        return {};
+    }
+    return {};
+}
+
 } // namespace
 
 std::string txiDirectiveValueKindToString(TxiDirectiveValueKind kind) {
@@ -520,6 +572,139 @@ std::string txiKeyReferenceText(const std::string& filter) {
     }
     const std::string result = out.str();
     return result.empty() ? ("No TXI catalog matches for: " + filter + "\n") : result;
+}
+
+TxiAutocompleteResult txiAutocomplete(std::string_view lineBeforeCaret,
+                                      bool includeAllDirectives) {
+    TxiAutocompleteResult result;
+
+    std::size_t first = 0;
+    while (first < lineBeforeCaret.size() &&
+           (lineBeforeCaret[first] == ' ' || lineBeforeCaret[first] == '\t')) {
+        ++first;
+    }
+
+    if (first == lineBeforeCaret.size()) {
+        if (!includeAllDirectives) return result;
+        result.kind = TxiAutocompleteKind::Directive;
+        for (const auto& directive : txiDirectiveCatalog()) {
+            if (directive.valueKind != TxiDirectiveValueKind::ValueToken) {
+                result.suggestions.push_back(directive.name);
+            }
+        }
+        sortAndUnique(result.suggestions);
+        return result;
+    }
+
+    if (lineBeforeCaret[first] == '#' || lineBeforeCaret[first] == ';') return result;
+
+    std::size_t keyEnd = first;
+    while (keyEnd < lineBeforeCaret.size() &&
+           lineBeforeCaret[keyEnd] != ' ' && lineBeforeCaret[keyEnd] != '\t') {
+        ++keyEnd;
+    }
+
+    if (keyEnd == lineBeforeCaret.size()) {
+        const std::string_view prefix = lineBeforeCaret.substr(first);
+        if (prefix.empty() && !includeAllDirectives) return result;
+
+        result.kind = TxiAutocompleteKind::Directive;
+        result.replacementLength = prefix.size();
+        for (const auto& directive : txiDirectiveCatalog()) {
+            if (directive.valueKind == TxiDirectiveValueKind::ValueToken) continue;
+            if (prefix.empty() || asciiStartsWith(directive.name, prefix)) {
+                result.suggestions.push_back(directive.name);
+            }
+        }
+        sortAndUnique(result.suggestions);
+        if (result.suggestions.empty()) result.kind = TxiAutocompleteKind::None;
+        return result;
+    }
+
+    std::string key(lineBeforeCaret.substr(first, keyEnd - first));
+    key = asciiLower(key);
+    if (key == "decal1") key = "decal";
+    const auto directive = findTxiDirective(key);
+    if (!directive || directive->valueKind == TxiDirectiveValueKind::ValueToken) return result;
+
+    std::size_t valueStart = keyEnd;
+    while (valueStart < lineBeforeCaret.size() &&
+           (lineBeforeCaret[valueStart] == ' ' || lineBeforeCaret[valueStart] == '\t')) {
+        ++valueStart;
+    }
+
+    std::size_t tokenStart = valueStart;
+    for (std::size_t index = valueStart; index < lineBeforeCaret.size(); ++index) {
+        const char ch = lineBeforeCaret[index];
+        if (ch == ' ' || ch == '\t' || ch == ',' || ch == '(' || ch == ')' ||
+            ch == '[' || ch == ']') {
+            tokenStart = index + 1;
+        }
+    }
+    const std::string_view prefix = lineBeforeCaret.substr(tokenStart);
+
+    result.kind = TxiAutocompleteKind::Value;
+    result.directive = directive->name;
+    result.replacementLength = prefix.size();
+    for (const auto& candidate : valueSuggestions(*directive)) {
+        if (prefix.empty() || asciiStartsWith(candidate, prefix)) {
+            result.suggestions.push_back(candidate);
+        }
+    }
+    sortAndUnique(result.suggestions);
+    if (result.suggestions.empty()) result.kind = TxiAutocompleteKind::None;
+    return result;
+}
+
+std::string txiDirectiveHint(const std::string& key) {
+    const auto directive = findTxiDirective(key);
+    if (!directive || directive->valueKind == TxiDirectiveValueKind::ValueToken) return {};
+
+    std::ostringstream out;
+    out << directive->name << " <" << txiDirectiveValueKindToString(directive->valueKind) << "> - "
+        << directive->layman;
+    if (!directive->allowedValues.empty()) {
+        out << " Allowed:";
+        for (const auto& value : directive->allowedValues) out << ' ' << value;
+        out << '.';
+    }
+    if (!directive->defaultValue.empty() && directive->defaultValue != "n/a") {
+        out << " Default: " << directive->defaultValue << '.';
+    }
+    if (!directive->interactions.empty()) out << ' ' << directive->interactions;
+    return out.str();
+}
+
+std::string txiValueHint(const std::string& key, const std::string& value) {
+    const auto directive = findTxiDirective(key);
+    if (!directive || directive->valueKind == TxiDirectiveValueKind::ValueToken) return {};
+
+    const std::string normalizedValue = asciiLower(trimTxi(value));
+    std::ostringstream out;
+    out << directive->name << " = " << value << " - ";
+
+    const auto token = findTxiDirective(normalizedValue);
+    const auto parent = valueTokenParents().find(normalizedValue);
+    if (token && token->valueKind == TxiDirectiveValueKind::ValueToken &&
+        parent != valueTokenParents().end() && parent->second == directive->name) {
+        out << token->layman;
+        if (!token->interactions.empty()) out << ' ' << token->interactions;
+        return out.str();
+    }
+
+    if ((directive->valueKind == TxiDirectiveValueKind::Boolean ||
+         directive->valueKind == TxiDirectiveValueKind::BooleanOrInteger) &&
+        (normalizedValue == "0" || normalizedValue == "1")) {
+        out << (normalizedValue == "0" ? "Disabled." : "Enabled.");
+    } else if (!directive->defaultValue.empty() &&
+               asciiLower(trimTxi(directive->defaultValue)) == normalizedValue) {
+        out << "Catalog default.";
+    } else {
+        out << directive->layman;
+    }
+
+    if (!directive->interactions.empty()) out << ' ' << directive->interactions;
+    return out.str();
 }
 
 } // namespace neotpc::texture

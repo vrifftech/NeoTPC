@@ -1552,7 +1552,8 @@ template <typename ImageWriter>
 void commitTextureAndSidecar(const TextureData& texture,
                              const std::filesystem::path& output,
                              bool writeSidecar,
-                             ImageWriter&& imageWriter) {
+                             ImageWriter&& imageWriter,
+                             bool keepEmptySidecar = false) {
     if (output.empty()) throw TextureError("Texture output path is empty");
     const auto parent = output.parent_path().empty() ? std::filesystem::path(".") : output.parent_path();
     std::error_code ec;
@@ -1578,12 +1579,13 @@ void commitTextureAndSidecar(const TextureData& texture,
     std::vector<Replacement> replacements;
     replacements.push_back({output, stagedImage, imageBackup});
     if (writeSidecar) {
-        replacements.push_back({sidecar, texture.txi.empty() ? std::filesystem::path{} : stagedSidecar, sidecarBackup});
+        const bool stageSidecar = keepEmptySidecar || !texture.txi.empty();
+        replacements.push_back({sidecar, stageSidecar ? stagedSidecar : std::filesystem::path{}, sidecarBackup});
     }
 
     try {
         imageWriter(stagedImage);
-        if (writeSidecar && !texture.txi.empty()) {
+        if (writeSidecar && (keepEmptySidecar || !texture.txi.empty())) {
             writeFileBytes(stagedSidecar,
                            std::vector<std::uint8_t>(texture.txi.begin(), texture.txi.end()));
         }
@@ -1639,13 +1641,21 @@ void validateLayer(const TextureLayer& layer) {
 }
 
 std::string normalizeTxiFooter(std::string txi) {
+    txi = sanitizeTxiPayload(std::move(txi));
     txi = trim(txi);
     if (txi.empty()) return {};
     std::string out;
-    for (char ch : txi) {
-        if (ch == '\r') continue;
-        if (ch == '\n') out += "\r\n";
-        else out.push_back(ch);
+    out.reserve(txi.size() + 2);
+    for (std::size_t index = 0; index < txi.size(); ++index) {
+        const char ch = txi[index];
+        if (ch == '\r') {
+            if (index + 1 < txi.size() && txi[index + 1] == '\n') ++index;
+            out += "\r\n";
+        } else if (ch == '\n') {
+            out += "\r\n";
+        } else {
+            out.push_back(ch);
+        }
     }
     if (out.size() < 2 || out.substr(out.size() - 2) != "\r\n") out += "\r\n";
     return out;
@@ -1889,6 +1899,163 @@ static bool looksLikeTpcHeader(const std::vector<std::uint8_t>& header) {
            (encoding == kTpcEncodingGray || encoding == kTpcEncodingRgb || encoding == kTpcEncodingRgba || encoding == kTpcEncodingSwizzledBgra) &&
            mipmaps < 32;
 }
+
+namespace {
+
+struct TpcContainerLayout {
+    std::uint32_t dataSize = 0;
+    float alphaBlending = 1.0f;
+    std::uint32_t headerWidth = 0;
+    std::uint32_t headerHeight = 0;
+    std::uint8_t encoding = 0;
+    std::uint8_t mipMapCount = 1;
+    bool uncompressed = true;
+    bool cubeMap = false;
+    std::uint32_t layerCount = 1;
+    std::uint32_t layerWidth = 0;
+    std::uint32_t layerHeight = 0;
+    TextureCompression compression = TextureCompression::None;
+    std::string encodingName;
+    std::size_t txiOffset = 128;
+};
+
+std::size_t tpcMipPayloadSize(const TpcContainerLayout& layout,
+                              std::uint32_t width,
+                              std::uint32_t height) {
+    if (!layout.uncompressed && layout.compression == TextureCompression::Dxt1) {
+        return dxt1Size(width, height);
+    }
+    if (!layout.uncompressed && layout.compression == TextureCompression::Dxt5) {
+        return dxt5Size(width, height);
+    }
+    if (layout.encoding == kTpcEncodingGray) {
+        return static_cast<std::size_t>(width) * height;
+    }
+    if (layout.encoding == kTpcEncodingRgb) {
+        return static_cast<std::size_t>(width) * height * 3u;
+    }
+    return static_cast<std::size_t>(width) * height * 4u;
+}
+
+TpcContainerLayout inspectTpcContainer(const std::vector<std::uint8_t>& bytes) {
+    if (bytes.size() < 128 || !looksLikeTpcHeader(bytes)) {
+        throw TextureError("Invalid or unsupported TPC header");
+    }
+
+    TpcContainerLayout layout;
+    layout.dataSize = readLE32(bytes, 0);
+    layout.alphaBlending = readLEFloat(bytes, 4);
+    layout.headerWidth = readLE16(bytes, 8);
+    layout.headerHeight = readLE16(bytes, 10);
+    layout.encoding = bytes[12];
+    layout.mipMapCount = bytes[13] == 0 ? 1 : bytes[13];
+    layout.uncompressed = layout.dataSize == 0;
+    layout.layerWidth = layout.headerWidth;
+    layout.layerHeight = layout.headerHeight;
+
+    const std::size_t candidateCubeBaseSize = layout.encoding == kTpcEncodingRgb
+        ? dxt1Size(layout.headerWidth, layout.headerWidth)
+        : layout.encoding == kTpcEncodingRgba
+            ? dxt5Size(layout.headerWidth, layout.headerWidth)
+            : 0;
+    if (!layout.uncompressed && layout.headerWidth != 0 &&
+        layout.headerHeight / layout.headerWidth == 6 &&
+        layout.headerHeight % layout.headerWidth == 0 &&
+        candidateCubeBaseSize == layout.dataSize) {
+        layout.cubeMap = true;
+        layout.layerCount = 6;
+        layout.layerHeight = layout.headerHeight / 6;
+    }
+
+    if (layout.uncompressed) {
+        if (layout.encoding == kTpcEncodingGray) {
+            layout.compression = TextureCompression::Gray;
+            layout.encodingName = "raw grayscale";
+        } else if (layout.encoding == kTpcEncodingSwizzledBgra) {
+            layout.compression = TextureCompression::SwizzledBgra;
+            layout.encodingName = "Xbox swizzled BGRA";
+        } else {
+            layout.compression = TextureCompression::None;
+            layout.encodingName = layout.encoding == kTpcEncodingRgba ? "raw RGBA" : "raw RGB";
+        }
+    } else if (layout.encoding == kTpcEncodingRgb) {
+        layout.compression = TextureCompression::Dxt1;
+        layout.encodingName = "DXT1";
+    } else if (layout.encoding == kTpcEncodingRgba) {
+        layout.compression = TextureCompression::Dxt5;
+        layout.encodingName = "DXT5";
+    } else if (layout.encoding == kTpcEncodingGray) {
+        layout.compression = TextureCompression::Gray;
+        layout.encodingName = "grayscale payload";
+    } else {
+        throw TextureError("Unknown compressed TPC encoding: " + std::to_string(layout.encoding));
+    }
+
+    std::uint64_t payloadSize = 0;
+    auto addPayload = [&](std::uint64_t amount) {
+        std::uint64_t next = 0;
+        if (!parser::checkedAdd(payloadSize, amount, next)) {
+            throw TextureError("TPC payload size overflows");
+        }
+        payloadSize = next;
+    };
+
+    if (!layout.uncompressed) {
+        if (!layout.cubeMap) {
+            addPayload(layout.dataSize);
+            std::uint32_t width = layout.layerWidth;
+            std::uint32_t height = layout.layerHeight;
+            for (std::uint8_t mip = 1; mip < layout.mipMapCount; ++mip) {
+                width = std::max<std::uint32_t>(1, width / 2);
+                height = std::max<std::uint32_t>(1, height / 2);
+                addPayload(tpcMipPayloadSize(layout, width, height));
+            }
+        } else {
+            std::uint64_t oneLayer = layout.dataSize;
+            std::uint32_t width = layout.layerWidth;
+            std::uint32_t height = layout.layerHeight;
+            for (std::uint8_t mip = 1; mip < layout.mipMapCount; ++mip) {
+                width = std::max<std::uint32_t>(1, width / 2);
+                height = std::max<std::uint32_t>(1, height / 2);
+                std::uint64_t next = 0;
+                if (!parser::checkedAdd(oneLayer, tpcMipPayloadSize(layout, width, height), next)) {
+                    throw TextureError("TPC cubemap payload size overflows");
+                }
+                oneLayer = next;
+            }
+            if (!parser::checkedMultiply(oneLayer, layout.layerCount, payloadSize)) {
+                throw TextureError("TPC cubemap payload size overflows");
+            }
+        }
+    } else {
+        std::uint64_t oneLayer = 0;
+        std::uint32_t width = layout.layerWidth;
+        std::uint32_t height = layout.layerHeight;
+        for (std::uint8_t mip = 0; mip < layout.mipMapCount; ++mip) {
+            std::uint64_t next = 0;
+            if (!parser::checkedAdd(oneLayer, tpcMipPayloadSize(layout, width, height), next)) {
+                throw TextureError("TPC raw payload size overflows");
+            }
+            oneLayer = next;
+            width = std::max<std::uint32_t>(1, width / 2);
+            height = std::max<std::uint32_t>(1, height / 2);
+        }
+        if (!parser::checkedMultiply(oneLayer, layout.layerCount, payloadSize)) {
+            throw TextureError("TPC raw payload size overflows");
+        }
+    }
+
+    std::uint64_t txiOffset = 0;
+    if (!parser::checkedAdd(UINT64_C(128), payloadSize, txiOffset)) {
+        throw TextureError("TPC payload offset overflows");
+    }
+    layout.txiOffset = txiOffset > bytes.size()
+        ? bytes.size()
+        : static_cast<std::size_t>(txiOffset);
+    return layout;
+}
+
+} // namespace
 
 static bool looksLikeTxbHeader(const std::vector<std::uint8_t>& header) {
     if (header.size() < 14) return false;
@@ -2372,102 +2539,25 @@ static void writeBmpTexture(const TextureData& texture, const std::filesystem::p
 
 TextureData readTpcTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
                                         const std::filesystem::path& path) {
-    if (bytes.size() < 128 || !looksLikeTpcHeader(bytes)) throw TextureError("Invalid or unsupported TPC header");
-    const std::uint32_t headerDataSize = readLE32(bytes, 0);
-    const float alphaBlending = readLEFloat(bytes, 4);
-    std::uint32_t headerWidth = readLE16(bytes, 8);
-    std::uint32_t headerHeight = readLE16(bytes, 10);
-    const std::uint8_t encoding = bytes[12];
-    std::uint8_t mipMapCount = bytes[13] == 0 ? 1 : bytes[13];
-    const bool uncompressed = headerDataSize == 0;
-
-    std::uint32_t layerCount = 1;
-    std::uint32_t layerWidth = headerWidth;
-    std::uint32_t layerHeight = headerHeight;
-    bool cubeMap = false;
-    const std::size_t candidateCubeBaseSize = encoding == kTpcEncodingRgb
-        ? dxt1Size(headerWidth, headerWidth)
-        : encoding == kTpcEncodingRgba ? dxt5Size(headerWidth, headerWidth) : 0;
-    if (!uncompressed && headerWidth != 0 && headerHeight / headerWidth == 6 &&
-        headerHeight % headerWidth == 0 && candidateCubeBaseSize == headerDataSize) {
-        cubeMap = true;
-        layerCount = 6;
-        layerHeight = headerHeight / 6;
-    }
-
-    TextureCompression compression = TextureCompression::None;
-    std::string encodingName;
-    if (uncompressed) {
-        if (encoding == kTpcEncodingGray) {
-            compression = TextureCompression::Gray;
-            encodingName = "raw grayscale";
-        } else if (encoding == kTpcEncodingSwizzledBgra) {
-            compression = TextureCompression::SwizzledBgra;
-            encodingName = "Xbox swizzled BGRA";
-        } else {
-            compression = TextureCompression::None;
-            encodingName = encoding == kTpcEncodingRgba ? "raw RGBA" : "raw RGB";
-        }
-    } else if (encoding == kTpcEncodingRgb) {
-        compression = TextureCompression::Dxt1;
-        encodingName = "DXT1";
-    } else if (encoding == kTpcEncodingRgba) {
-        compression = TextureCompression::Dxt5;
-        encodingName = "DXT5";
-    } else if (encoding == kTpcEncodingGray) {
-        compression = TextureCompression::Gray;
-        encodingName = "grayscale payload";
-    } else {
-        throw TextureError("Unknown compressed TPC encoding: " + std::to_string(encoding));
-    }
+    const TpcContainerLayout layout = inspectTpcContainer(bytes);
+    const std::uint32_t headerDataSize = layout.dataSize;
+    const float alphaBlending = layout.alphaBlending;
+    const std::uint32_t headerWidth = layout.headerWidth;
+    const std::uint32_t headerHeight = layout.headerHeight;
+    const std::uint8_t encoding = layout.encoding;
+    std::uint8_t mipMapCount = layout.mipMapCount;
+    const bool uncompressed = layout.uncompressed;
+    std::uint32_t layerCount = layout.layerCount;
+    std::uint32_t layerWidth = layout.layerWidth;
+    std::uint32_t layerHeight = layout.layerHeight;
+    const bool cubeMap = layout.cubeMap;
+    const TextureCompression compression = layout.compression;
 
     auto mipSize = [&](std::uint32_t w, std::uint32_t h) -> std::size_t {
-        if (!uncompressed && compression == TextureCompression::Dxt1) return dxt1Size(w, h);
-        if (!uncompressed && compression == TextureCompression::Dxt5) return dxt5Size(w, h);
-        if (encoding == kTpcEncodingGray) return static_cast<std::size_t>(w) * h;
-        if (encoding == kTpcEncodingRgb) return static_cast<std::size_t>(w) * h * 3;
-        return static_cast<std::size_t>(w) * h * 4;
+        return tpcMipPayloadSize(layout, w, h);
     };
 
-    std::size_t initialPayloadSize = 0;
-    if (!uncompressed) {
-        initialPayloadSize = headerDataSize;
-        if (!cubeMap) {
-            std::uint32_t w = layerWidth;
-            std::uint32_t h = layerHeight;
-            for (std::uint8_t i = 1; i < mipMapCount; ++i) {
-                w = std::max<std::uint32_t>(1, w / 2);
-                h = std::max<std::uint32_t>(1, h / 2);
-                initialPayloadSize += mipSize(w, h);
-            }
-        } else {
-            std::size_t oneLayer = headerDataSize;
-            std::uint32_t w = layerWidth;
-            std::uint32_t h = layerHeight;
-            for (std::uint8_t i = 1; i < mipMapCount; ++i) {
-                w = std::max<std::uint32_t>(1, w / 2);
-                h = std::max<std::uint32_t>(1, h / 2);
-                oneLayer += mipSize(w, h);
-            }
-            initialPayloadSize = oneLayer * layerCount;
-        }
-    } else {
-        std::size_t oneLayer = mipSize(layerWidth, layerHeight);
-        std::uint32_t w = layerWidth;
-        std::uint32_t h = layerHeight;
-        for (std::uint8_t i = 1; i < mipMapCount; ++i) {
-            w = std::max<std::uint32_t>(1, w / 2);
-            h = std::max<std::uint32_t>(1, h / 2);
-            oneLayer += mipSize(w, h);
-        }
-        initialPayloadSize = oneLayer * layerCount;
-    }
-
-    std::size_t txiOffset = 128 + initialPayloadSize;
-    if (txiOffset > bytes.size()) {
-        // Some hand-authored TPCs have inconsistent mip counts; clamp to the payload.
-        txiOffset = bytes.size();
-    }
+    const std::size_t txiOffset = layout.txiOffset;
     std::string txi;
     if (txiOffset < bytes.size()) {
         txi = sanitizeTxiPayload(std::string(bytes.begin() + static_cast<std::ptrdiff_t>(txiOffset), bytes.end()));
@@ -2526,7 +2616,7 @@ TextureData readTpcTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
     texture.cubeMap = cubeMap;
     texture.animated = animated;
     texture.sourceMipMapCount = mipMapCount;
-    texture.sourceEncoding = encodingName;
+    texture.sourceEncoding = layout.encodingName;
 
     std::size_t offset = 128;
     const std::size_t payloadLimit = txiOffset;
@@ -3378,6 +3468,99 @@ void saveTexture(const TextureData& texture, const std::filesystem::path& output
         return;
     }
     throw TextureError("Unsupported texture output extension: " + ext + " (expected .tga, .png, .jpg, .bmp, .tpc, .dds, or .txi)");
+}
+
+void replaceTpcEmbeddedTxi(const std::filesystem::path& tpcPath,
+                           const std::string& txi) {
+    if (tpcPath.empty()) throw TextureError("TPC path is empty");
+    const auto original = readFileBytes(tpcPath);
+    const auto layout = inspectTpcContainer(original);
+    const auto originalTexture = readTpcTextureBytesInternal(original, tpcPath);
+    const std::string normalizedTxi = normalizeTxiFooter(txi);
+
+    std::vector<std::uint8_t> replacement;
+    replacement.reserve(layout.txiOffset + normalizedTxi.size());
+    replacement.insert(replacement.end(), original.begin(),
+                       original.begin() + static_cast<std::ptrdiff_t>(layout.txiOffset));
+    replacement.insert(replacement.end(), normalizedTxi.begin(), normalizedTxi.end());
+
+    // Validate the complete replacement before touching the original file.
+    // This catches TXI animation layouts that are incompatible with the
+    // existing encoded payload.
+    const auto replacementTexture = readTpcTextureBytesInternal(replacement, tpcPath);
+    if (replacementTexture.cubeMap != originalTexture.cubeMap ||
+        replacementTexture.animated != originalTexture.animated ||
+        replacementTexture.layers.size() != originalTexture.layers.size()) {
+        throw TextureError("The edited TXI changes the TPC image layout; split and recombine the texture instead");
+    }
+    for (std::size_t layer = 0; layer < originalTexture.layers.size(); ++layer) {
+        const auto& before = originalTexture.layers[layer];
+        const auto& after = replacementTexture.layers[layer];
+        if (before.width != after.width || before.height != after.height ||
+            before.mipmaps.size() != after.mipmaps.size()) {
+            throw TextureError("The edited TXI changes the TPC image layout; split and recombine the texture instead");
+        }
+        for (std::size_t mip = 0; mip < before.mipmaps.size(); ++mip) {
+            if (before.mipmaps[mip].width != after.mipmaps[mip].width ||
+                before.mipmaps[mip].height != after.mipmaps[mip].height) {
+                throw TextureError("The edited TXI changes the TPC image layout; split and recombine the texture instead");
+            }
+        }
+    }
+
+    TextureData placeholder;
+    commitTextureAndSidecar(placeholder, tpcPath, false, [&](const auto& staged) {
+        writeFileBytes(staged, replacement);
+    });
+}
+
+TgaTxiPairPaths saveTgaTxiPair(const TextureData& texture,
+                               const std::filesystem::path& outputTga) {
+    if (extensionLower(outputTga) != "tga") {
+        throw TextureError("TGA/TXI split output must use the .tga extension");
+    }
+    if (!texture.hasPixels()) {
+        throw TextureError("Cannot create a TGA/TXI pair without pixel data");
+    }
+
+    commitTextureAndSidecar(texture, outputTga, true,
+                            [&](const auto& staged) { writeTgaTexture(texture, staged); },
+                            true);
+    auto txiPath = outputTga;
+    txiPath.replace_extension(".txi");
+    return {outputTga, std::move(txiPath)};
+}
+
+TgaTxiPairPaths splitTpcToTgaTxi(const std::filesystem::path& inputTpc,
+                                 const std::filesystem::path& outputTga) {
+    auto texture = loadTexture(inputTpc);
+    if (texture.kind != TextureFileKind::Tpc) {
+        throw TextureError("Split input is not a TPC texture");
+    }
+    return saveTgaTxiPair(texture, outputTga);
+}
+
+void combineTgaTxiToTpc(const std::filesystem::path& inputTga,
+                        const std::optional<std::filesystem::path>& inputTxi,
+                        const std::filesystem::path& outputTpc,
+                        const TextureSaveOptions& options) {
+    if (extensionLower(outputTpc) != "tpc") {
+        throw TextureError("Combined texture output must use the .tpc extension");
+    }
+
+    TextureData texture;
+    if (inputTxi) {
+        const auto imageBytes = readFileBytes(inputTga);
+        const auto txiBytes = readFileBytes(*inputTxi);
+        texture = loadTextureBytes(imageBytes, inputTga,
+            sanitizeTxiPayload(std::string(txiBytes.begin(), txiBytes.end())));
+    } else {
+        texture = loadTexture(inputTga);
+    }
+    if (texture.kind != TextureFileKind::Tga) {
+        throw TextureError("Combine input is not a TGA image");
+    }
+    saveTexture(texture, outputTpc, options);
 }
 
 std::string textureSummary(const TextureData& texture) {

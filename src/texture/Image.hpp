@@ -132,6 +132,30 @@ TextureData loadTextureBytes(const std::vector<std::uint8_t>& bytes,
 void saveTexture(const TextureData& texture,
                  const std::filesystem::path& output,
                  const TextureSaveOptions& options = {});
+
+struct TgaTxiPairPaths {
+    std::filesystem::path tga;
+    std::filesystem::path txi;
+};
+
+// Replaces only the embedded TXI footer of an existing TPC. The 128-byte
+// header and encoded pixel/mipmap payload are preserved byte-for-byte.
+void replaceTpcEmbeddedTxi(const std::filesystem::path& tpcPath,
+                           const std::string& txi);
+
+// Writes a lossless TGA plus a same-stem TXI sidecar. The TXI file is created
+// even when the metadata is empty so an explicit split always produces a pair.
+TgaTxiPairPaths saveTgaTxiPair(const TextureData& texture,
+                               const std::filesystem::path& outputTga);
+TgaTxiPairPaths splitTpcToTgaTxi(const std::filesystem::path& inputTpc,
+                                 const std::filesystem::path& outputTga);
+
+// Builds a TPC from a TGA and either the supplied TXI file or, when omitted,
+// the same-stem sidecar discovered beside the TGA.
+void combineTgaTxiToTpc(const std::filesystem::path& inputTga,
+                        const std::optional<std::filesystem::path>& inputTxi,
+                        const std::filesystem::path& outputTpc,
+                        const TextureSaveOptions& options = {});
 TxiFeatures parseTxiFeatures(const std::string& txi);
 std::string setTxiValue(const std::string& txi, const std::string& key, const std::string& value);
 std::optional<std::string> getTxiValue(const std::string& txi, const std::string& key);

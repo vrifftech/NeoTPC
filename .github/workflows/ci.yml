@@ -80,7 +80,7 @@ jobs:
           test -x "$WX_CONFIG"
           "$WX_CONFIG" --version
           "$WX_CONFIG" --selected-config
-          "$WX_CONFIG" --libs core,base,adv > /dev/null
+          "$WX_CONFIG" --libs core,base,adv,stc > /dev/null
 
       - name: Bootstrap vcpkg
         run: bash ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
