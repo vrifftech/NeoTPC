@@ -27,7 +27,7 @@
 #include <wx/toolbar.h>
 #include <wx/wx.h>
 
-#include "neotpc_icon.xpm"
+#include "tpc_icon.xpm"
 
 #include <algorithm>
 #include <chrono>
@@ -51,6 +51,12 @@ namespace neotpc {
 namespace {
 
 constexpr const char* kAppName = "NeoTPC";
+
+wxIcon makeAppIcon() {
+    wxIcon icon;
+    icon.CopyFromBitmap(wxBitmap(tpc_icon));
+    return icon;
+}
 
 enum : int {
     ID_SAVE_AS = wxID_HIGHEST + 710,
@@ -207,9 +213,7 @@ public:
         : wxFrame(nullptr, wxID_ANY, kAppName, wxDefaultPosition, wxSize(1280, 820)),
           settings_(kAppName), animationTimer_(this, ID_ANIMATION_TIMER), darkMode_(settings_.darkMode()) {
         SetMinSize(FromDIP(wxSize(900, 600)));
-        wxIcon icon;
-        icon.CopyFromBitmap(wxBitmap(neotpc_icon));
-        SetIcon(icon);
+        SetIcon(makeAppIcon());
         buildMenus();
         buildInterface();
         if (!settings_.restoreWindowPlacement(*this)) Centre();
@@ -1260,6 +1264,7 @@ private:
         info.SetName(kAppName);
         info.SetVersion(NEOTPC_VERSION);
         info.SetDescription("TPC/TXB/TGA/DDS texture viewer, conflict comparator, TXI inspector, and converter for the Neo tool suite.");
+        info.SetIcon(makeAppIcon());
         wxAboutBox(info, this);
     }
 

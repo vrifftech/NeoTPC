@@ -199,6 +199,10 @@ if(NEOTPC_BUILD_WX_GUI)
         )
         if(WIN32)
             list(APPEND NEOTPC_WX_SOURCES resources/neotpc.rc)
+        elseif(APPLE)
+            list(APPEND NEOTPC_WX_SOURCES resources/tpc.icns)
+            set_source_files_properties(resources/tpc.icns PROPERTIES
+                MACOSX_PACKAGE_LOCATION "Resources")
         endif()
         if(WIN32)
             add_executable(NeoTPC WIN32 ${NEOTPC_WX_SOURCES})
@@ -211,6 +215,10 @@ if(NEOTPC_BUILD_WX_GUI)
         target_include_directories(NeoTPC PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/wx ${CMAKE_CURRENT_SOURCE_DIR}/resources)
         neotpc_link_wx(NeoTPC)
         target_compile_features(NeoTPC PRIVATE cxx_std_17)
+        if(APPLE)
+            set_target_properties(NeoTPC PROPERTIES
+                MACOSX_BUNDLE_ICON_FILE "tpc.icns")
+        endif()
         if(MSVC)
             target_compile_options(NeoTPC PRIVATE /W4 /permissive- /utf-8)
         else()
@@ -219,11 +227,14 @@ if(NEOTPC_BUILD_WX_GUI)
         install(TARGETS NeoTPC BUNDLE DESTINATION . RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
         if(UNIX AND NOT APPLE)
-            foreach(NEO_ICON_SIZE 16 24 32 48 64 128 256)
-                install(FILES resources/icons/${NEO_ICON_SIZE}x${NEO_ICON_SIZE}/neotpc.png
+            foreach(NEO_ICON_SIZE 16 24 32 48 64 128 256 512)
+                install(FILES resources/icons/${NEO_ICON_SIZE}x${NEO_ICON_SIZE}/tpc.png
                     DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/${NEO_ICON_SIZE}x${NEO_ICON_SIZE}/apps
                     RENAME neotpc.png)
             endforeach()
+            install(FILES resources/tpc.svg
+                DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/apps
+                RENAME neotpc.svg)
             configure_file(resources/neotpc.desktop.in ${CMAKE_CURRENT_BINARY_DIR}/neotpc.desktop @ONLY)
             install(FILES ${CMAKE_CURRENT_BINARY_DIR}/neotpc.desktop
                     DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/applications)
