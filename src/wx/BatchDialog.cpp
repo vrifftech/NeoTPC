@@ -86,9 +86,9 @@ BatchDialog::BatchDialog(wxWindow* parent, const wxString& initialDirectory, boo
     root->Add(buttons, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(10));
 
     SetSizer(root);
-    SetMinSize(FromDIP(wxSize(660, 620)));
-    SetInitialSize(FromDIP(wxSize(780, 760)));
+    wxui::configureResponsiveWindow(*this, wxSize(780, 760), wxSize(560, 420));
     CentreOnParent();
+    wxui::constrainWindowToDisplay(*this);
     Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { onConvert(); }, ID_CONVERT);
     Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { EndModal(wxID_CLOSE); }, wxID_CLOSE);
     wxui::applyTheme(this, darkMode);

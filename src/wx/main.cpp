@@ -186,7 +186,9 @@ public:
         root->Add(CreateSeparatedButtonSizer(wxOK | wxCANCEL), 0,
                   wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(10));
         SetSizerAndFit(root);
-        SetMinSize(FromDIP(wxSize(440, 500)));
+        wxui::configureResponsiveWindow(*this, wxSize(520, 620), wxSize(400, 360));
+        CentreOnParent();
+        wxui::constrainWindowToDisplay(*this);
     }
 
     neotpc::texture::TextureSaveOptions options() const {
@@ -210,13 +212,13 @@ private:
 class MainFrame final : public wxFrame {
 public:
     MainFrame()
-        : wxFrame(nullptr, wxID_ANY, kAppName, wxDefaultPosition, wxSize(1280, 820)),
+        : wxFrame(nullptr, wxID_ANY, kAppName, wxDefaultPosition, wxDefaultSize),
           settings_(kAppName), animationTimer_(this, ID_ANIMATION_TIMER), darkMode_(settings_.darkMode()) {
-        SetMinSize(FromDIP(wxSize(900, 600)));
         SetIcon(makeAppIcon());
         buildMenus();
         buildInterface();
-        if (!settings_.restoreWindowPlacement(*this)) Centre();
+        wxui::configureResponsiveWindow(*this, wxSize(1280, 820), wxSize(720, 480));
+        settings_.restoreWindowPlacement(*this);
         SetDropTarget(new TextureDropTarget(this));
         Bind(wxEVT_CLOSE_WINDOW, &MainFrame::onCloseWindow, this);
         Bind(wxEVT_TIMER, &MainFrame::onAnimationTimer, this, ID_ANIMATION_TIMER);
