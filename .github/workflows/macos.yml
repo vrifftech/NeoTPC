@@ -1,0 +1,131 @@
+name: macOS
+
+on:
+  push:
+  pull_request:
+  repository_dispatch:
+    types: [neoshared-updated]
+  workflow_dispatch:
+    inputs:
+      neoshared_ref:
+        description: neoshared branch, tag, or commit SHA (blank uses NEOSHARED_REF or main)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NEOSHARED_REF: ${{ github.event.client_payload.neoshared_ref || inputs.neoshared_ref || vars.NEOSHARED_REF || 'main' }}
+  MACOSX_DEPLOYMENT_TARGET: '15.0'
+
+jobs:
+  macos:
+    name: macOS 15 (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+            vcpkg_triplet: arm64-osx
+          - runner: macos-15-intel
+            arch: x86_64
+            vcpkg_triplet: x64-osx
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
+      VCPKG_BINARY_SOURCES: clear;x-gha,readwrite
+
+    steps:
+      - name: Check out NeoTPC
+        uses: actions/checkout@v7
+        with:
+          path: tool
+          persist-credentials: false
+
+      - name: Check out neoshared
+        uses: actions/checkout@v7
+        with:
+          repository: vrifftech/neoshared
+          ref: ${{ env.NEOSHARED_REF }}
+          path: neoshared
+          persist-credentials: false
+
+      - name: Read pinned vcpkg baseline
+        id: vcpkg-baseline
+        shell: bash
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          with open('tool/vcpkg.json', encoding='utf-8') as manifest_file:
+              print(f"sha={json.load(manifest_file)['builtin-baseline']}")
+          PY
+
+      - name: Check out pinned vcpkg
+        uses: actions/checkout@v7
+        with:
+          repository: microsoft/vcpkg
+          ref: ${{ steps.vcpkg-baseline.outputs.sha }}
+          path: vcpkg
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate native runner
+        run: |
+          test "$(uname -m)" = "${{ matrix.arch }}"
+          sw_vers
+          xcodebuild -version
+
+      - name: Install dependencies
+        run: |
+          brew install cmake ninja wxwidgets
+          WX_PREFIX="$(brew --prefix wxwidgets)"
+          echo "$WX_PREFIX/bin" >> "$GITHUB_PATH"
+          echo "CMAKE_PREFIX_PATH=$WX_PREFIX" >> "$GITHUB_ENV"
+          "$WX_PREFIX/bin/wx-config" --version
+
+      - name: Bootstrap vcpkg
+        run: bash ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
+
+      - name: Enable vcpkg GitHub Actions cache
+        uses: actions/github-script@v9
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Build and package NeoTPC
+        working-directory: tool
+        run: |
+          bash ./scripts/build-macos.sh \
+            --arch "${{ matrix.arch }}" \
+            --deployment-target "$MACOSX_DEPLOYMENT_TARGET" \
+            --neoshared-root ../neoshared \
+            --vcpkg-root ../vcpkg \
+            --vcpkg-triplet "${{ matrix.vcpkg_triplet }}" \
+            --jobs 2 \
+            --clean
+
+      - name: Verify package checksum
+        run: |
+          cd tool/dist
+          shasum -a 256 -c NeoTPC-*-macos-${{ matrix.arch }}.zip.sha256
+          unzip -l NeoTPC-*-macos-${{ matrix.arch }}.zip
+
+      - name: Upload macOS package
+        uses: actions/upload-artifact@v7
+        with:
+          name: NeoTPC-macos-${{ matrix.arch }}-${{ github.sha }}
+          path: |
+            tool/dist/NeoTPC-*-macos-${{ matrix.arch }}.zip
+            tool/dist/NeoTPC-*-macos-${{ matrix.arch }}.zip.sha256
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0

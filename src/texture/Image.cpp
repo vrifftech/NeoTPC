@@ -1843,13 +1843,12 @@ std::string setTxiValue(const std::string& txi, const std::string& key, const st
     if (trimmedKey.empty()) throw TextureError("TXI key cannot be empty");
     const auto directive = findTxiDirective(trimmedKey);
     if (!directive) {
-        throw TextureError("Unknown TXI key: " + trimmedKey + ". Edit the TXI source view directly to preserve custom/untraced directives.");
+        throw TextureError("Unknown TXI key: " + trimmedKey + ". Edit the TXI source view directly to preserve custom directives.");
     }
-    if (directive->valueKind == TxiDirectiveValueKind::ValueToken) {
-        throw TextureError(directive->name + " is a TXI value token, not a standalone key");
-    }
-    if (directive->valueKind == TxiDirectiveValueKind::CoordinateBlockCount) {
-        throw TextureError(directive->name + " begins a counted coordinate block; edit the TXI source view so its record rows stay together");
+    if (directive->valueKind == TxiDirectiveValueKind::FloatList ||
+        directive->valueKind == TxiDirectiveValueKind::Vector3List) {
+        throw TextureError(directive->name +
+            " begins a multi-line list; edit the TXI source view so its rows stay together");
     }
     const std::string normalizedValue = trim(value);
     const std::string oneLine = directive->name + " " + normalizedValue + "\n";

@@ -12,7 +12,6 @@
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
-CTestTestfile.cmake
 compile_commands.json
 install_manifest.txt
 
@@ -48,3 +47,8 @@ install_manifest.txt
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# WebAssembly and GitHub Pages outputs
+/build-wasm*/
+/dist-wasm/
+.neo-wasm-deps/

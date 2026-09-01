@@ -10,15 +10,14 @@ namespace neotpc::texture {
 
 enum class TxiDirectiveValueKind {
     Boolean,
-    BooleanOrInteger,
     Integer,
+    SignedShort,
     Float,
-    ResRef,
+    Vector3,
+    ResourceName,
     Enum,
-    NumericList,
-    CoordinateBlockCount,
-    FreeText,
-    ValueToken,
+    FloatList,
+    Vector3List,
 };
 
 enum class TxiIssueSeverity {
@@ -29,14 +28,12 @@ enum class TxiIssueSeverity {
 
 struct TxiDirectiveInfo {
     std::string name;
-    std::string kind;
-    std::string parser;
-    std::string state;
+    std::string category;
+    TxiDirectiveValueKind valueKind = TxiDirectiveValueKind::Integer;
+    std::string valueHint;
     std::string defaultValue;
-    std::string where;
-    std::string layman;
-    std::string interactions;
-    TxiDirectiveValueKind valueKind = TxiDirectiveValueKind::FreeText;
+    std::string description;
+    std::string notes;
     std::vector<std::string> allowedValues;
 };
 
@@ -45,7 +42,8 @@ struct TxiEntry {
     std::string key;
     std::string value;
     bool blankOrComment = false;
-    bool coordinateData = false;
+    bool listData = false;
+    bool listTerminator = false;
 };
 
 struct TxiValidationIssue {
@@ -80,6 +78,7 @@ std::string txiKeyReferenceText(bool includeDetails = false);
 std::string txiKeyReferenceText(const std::string& filter);
 TxiAutocompleteResult txiAutocomplete(std::string_view lineBeforeCaret,
                                       bool includeAllDirectives = false);
+std::string txiDirectiveSignature(const std::string& key);
 std::string txiDirectiveHint(const std::string& key);
 std::string txiValueHint(const std::string& key, const std::string& value);
 

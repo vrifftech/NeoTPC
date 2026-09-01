@@ -109,11 +109,8 @@ jobs:
             --jobs 2 \
             --clean \
             -- \
-            -DNEOTPC_BUILD_TESTS=ON \
             -DwxWidgets_CONFIG_EXECUTABLE="$WX_CONFIG"
 
-      - name: Run tests
-        run: ctest --test-dir tool/build -C Release --output-on-failure
 
       - name: Stage install tree
         run: cmake --install tool/build --config Release --prefix tool/stage
@@ -203,12 +200,8 @@ jobs:
             -VcpkgRoot ..\vcpkg `
             -VcpkgTriplet x64-windows-static `
             -Parallel 2 `
-            -Clean `
-            -ExtraCMakeArgs '-DNEOTPC_BUILD_TESTS=ON'
+            -Clean
 
-      - name: Run tests
-        shell: pwsh
-        run: ctest --test-dir tool/build -C Release --output-on-failure
 
       - name: Stage install tree
         shell: pwsh

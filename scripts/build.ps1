@@ -21,7 +21,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $RootDir = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$ProjectName = Split-Path -Leaf $RootDir
+$ProjectName = 'NeoTPC'
 
 if ([string]::IsNullOrWhiteSpace($BuildDir)) {
     $BuildDir = Join-Path $RootDir 'build'

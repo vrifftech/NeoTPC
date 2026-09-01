@@ -1,4 +1,7 @@
 #include "BatchDialog.hpp"
+#if defined(__EMSCRIPTEN__)
+#include "BrowserWorkload.hpp"
+#endif
 #include "EncodingOptionsPanel.hpp"
 #include "PathUtils.hpp"
 #include "TextureCanvas.hpp"
@@ -36,14 +39,24 @@
 #include <exception>
 #include <filesystem>
 #include <functional>
+#ifndef __EMSCRIPTEN__
 #include <future>
+#endif
 #include <iterator>
 #include <limits>
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
+
+#if defined(__EMSCRIPTEN__)
+#include "NeoBrowserFiles.hpp"
+#include <neoshared/wasm_dialog_compat.h>
+#include <wx/weakref.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -98,11 +111,13 @@ const char* saveWildcard() {
            "TXI metadata (*.txi)|*.txi";
 }
 
+#if !defined(__EMSCRIPTEN__)
 std::string extensionForFilter(int index) {
     static const char* extensions[] = {".tpc", ".tga", ".dds", ".png", ".jpg", ".bmp", ".txi"};
     if (index < 0 || index >= static_cast<int>(sizeof(extensions) / sizeof(extensions[0]))) return ".tpc";
     return extensions[index];
 }
+#endif
 
 wxImage makePreviewImage(const neotpc::texture::TextureLayer& layer, int mode) {
     wxImage image(static_cast<int>(layer.width), static_cast<int>(layer.height), false);
@@ -173,6 +188,97 @@ struct ComparisonImage {
     wxStaticText* label = nullptr;
 };
 
+
+#if defined(__EMSCRIPTEN__)
+
+constexpr std::size_t kBrowserComparisonMaxImages = 16;
+constexpr std::size_t kBrowserComparisonMaxSelectedFiles = 64;
+constexpr std::size_t kBrowserComparisonMaxPathDepth = 16;
+constexpr std::size_t kBrowserComparisonMaxTextureBytes = 64u * 1024u * 1024u;
+constexpr std::size_t kBrowserComparisonMaxTxiBytes = 1u * 1024u * 1024u;
+constexpr std::uint64_t kBrowserComparisonMaxAggregateInputBytes = UINT64_C(192) * 1024 * 1024;
+constexpr std::uint64_t kBrowserComparisonMaxDecodedBytes = UINT64_C(192) * 1024 * 1024;
+
+const char* browserComparisonAccept() {
+    return ".tpc,.txb,.tga,.dds,.png,.jpg,.jpeg,.jpe,.bmp,.txi";
+}
+
+bool isBrowserComparisonPixelExtension(const std::string& extension) {
+    return extension == "tpc" || extension == "txb" || extension == "tga" ||
+           extension == "dds" || extension == "png" || extension == "jpg" ||
+           extension == "jpeg" || extension == "jpe" || extension == "bmp";
+}
+
+std::optional<fs::path> normalizeBrowserComparisonPath(const std::string& value,
+                                                       std::string& error) {
+    std::string portable = value;
+    std::replace(portable.begin(), portable.end(), '\\', '/');
+    while (!portable.empty() && portable.front() == '/') portable.erase(portable.begin());
+    if (portable.empty()) {
+        error = "A selected browser file has an empty relative path.";
+        return std::nullopt;
+    }
+
+    fs::path result;
+    std::size_t depth = 0;
+    std::size_t begin = 0;
+    while (begin <= portable.size()) {
+        const std::size_t slash = portable.find('/', begin);
+        const std::size_t end = slash == std::string::npos ? portable.size() : slash;
+        const std::string component = portable.substr(begin, end - begin);
+        if (!component.empty() && component != ".") {
+            if (component == "..") {
+                error = "A selected browser path contains a parent-directory component.";
+                return std::nullopt;
+            }
+            if (component.find(':') != std::string::npos ||
+                component.find('\0') != std::string::npos) {
+                error = "A selected browser path contains an invalid component.";
+                return std::nullopt;
+            }
+            result /= fs::path(component);
+            if (++depth > kBrowserComparisonMaxPathDepth) {
+                error = "A selected browser path exceeds the comparison depth limit.";
+                return std::nullopt;
+            }
+        }
+        if (slash == std::string::npos) break;
+        begin = slash + 1;
+    }
+    if (result.empty() || result.is_absolute() || result.has_root_name()) {
+        error = "A selected browser file has an unsafe relative path.";
+        return std::nullopt;
+    }
+    return result.lexically_normal();
+}
+
+std::string browserComparisonPathKey(const fs::path& path) {
+    return neotpc::texture::asciiLower(
+        neotpc::texture::genericPathToUtf8(path.lexically_normal()));
+}
+
+struct BrowserComparisonCandidate {
+    neobrowser::RetainedFileInfo source;
+    std::optional<neobrowser::RetainedFileInfo> sidecar;
+    fs::path relativePath;
+};
+
+struct BrowserComparisonState {
+    std::uint64_t generation = 0;
+    std::uint32_t sessionId = 0;
+    std::vector<BrowserComparisonCandidate> candidates;
+    std::size_t index = 0;
+    std::uint32_t activeReadRequest = 0;
+    std::vector<std::uint8_t> sourceBytes;
+    std::string sidecarTxi;
+    std::uint64_t decodedBytes = 0;
+    std::vector<ComparisonImage> loaded;
+    std::vector<std::string> failures;
+    std::unique_ptr<wxProgressDialog> progress;
+};
+
+#endif
+
 class TpcEncodingDialog final : public wxDialog {
 public:
     TpcEncodingDialog(wxWindow* parent,
@@ -224,14 +330,24 @@ public:
         Bind(wxEVT_TIMER, &MainFrame::onAnimationTimer, this, ID_ANIMATION_TIMER);
         wxui::applyTheme(this, darkMode_);
         txiEditor_->applyTheme(darkMode_);
+        applyTxiHintTheme();
         canvas_->setDarkMode(darkMode_);
         refreshCatalog();
         updateWindowState();
         wxui::setStatusText(*this, "Ready - open or drop a texture", 0);
     }
 
+    ~MainFrame() override {
+#if defined(__EMSCRIPTEN__)
+        cancelBrowserComparisonLoad(false, false);
+#endif
+    }
+
     bool openPath(const fs::path& path) {
         if (path.empty() || !maybeSave()) return false;
+#if defined(__EMSCRIPTEN__)
+        cancelBrowserComparisonLoad(false, true);
+#endif
         try {
             wxBusyCursor busy;
             document_.open(path);
@@ -542,18 +658,29 @@ private:
         Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { openConflictingImages(); }, ID_OPEN_CONFLICTS);
     }
 
+    void applyTxiHintTheme() {
+        if (txiAutocompleteHint_ == nullptr || txiEditor_ == nullptr) return;
+        const wxui::ThemePalette palette = wxui::themePalette(darkMode_);
+        const int pointSize = std::max(9, txiEditor_->GetFont().GetPointSize());
+        txiAutocompleteHint_->SetFont(
+            wxFont(wxFontInfo(pointSize).Family(wxFONTFAMILY_TELETYPE)));
+        txiAutocompleteHint_->SetForegroundColour(palette.mutedText);
+        txiAutocompleteHint_->Refresh(false);
+    }
+
     void buildTxiPage() {
         auto* page = new wxPanel(notebook_, wxID_ANY);
         auto* root = new wxBoxSizer(wxVERTICAL);
         txiHelp_ = new wxStaticText(page, wxID_ANY,
-            "TXI controls Odyssey material, animation, cube-map, font, and procedural behavior. Open a texture to "
-            "edit its embedded or sidecar metadata. Type a directive or press Ctrl+Space for TXI index suggestions.");
+            "TXI controls Odyssey material, animation, cube-map, font, and procedural behavior. Start typing a "
+            "directive to see a muted completion and press Tab to accept it. Once the directive is complete, the "
+            "same hint shows its value type or range. Ctrl+Space opens all matching dictionary entries.");
         txiHelp_->Wrap(FromDIP(520));
         root->Add(txiHelp_, 0, wxEXPAND | wxALL, FromDIP(8));
         txiEditor_ = new TxiEditor(page);
         root->Add(txiEditor_, 1, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(8));
         txiAutocompleteHint_ = new wxStaticText(
-            page, wxID_ANY, "Type a TXI directive or press Ctrl+Space for suggestions.");
+            page, wxID_ANY, "Start typing a TXI directive. Tab accepts a unique completion.");
         txiAutocompleteHint_->Wrap(FromDIP(680));
         root->Add(txiAutocompleteHint_, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(8));
         auto* txiButtons = new wxBoxSizer(wxHORIZONTAL);
@@ -569,7 +696,11 @@ private:
         root->Add(txiIssues_, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(8));
         page->SetSizer(root);
         notebook_->AddPage(page, "TXI", false);
+#ifdef __EMSCRIPTEN__
+        txiEditor_->Bind(wxEVT_TEXT, [this](wxCommandEvent&) { onTxiChanged(); });
+#else
         txiEditor_->Bind(wxEVT_STC_CHANGE, [this](wxStyledTextEvent&) { onTxiChanged(); });
+#endif
         txiEditor_->setHintHandler([this](const wxString& hint) {
             if (txiAutocompleteHint_ == nullptr) return;
             txiAutocompleteHint_->SetLabel(hint);
@@ -585,13 +716,13 @@ private:
         auto* page = new wxPanel(notebook_, wxID_ANY);
         auto* root = new wxBoxSizer(wxVERTICAL);
         catalogFilter_ = new wxTextCtrl(page, wxID_ANY);
-        catalogFilter_->SetHint("Filter TXI keys, meanings, or categories...");
+        catalogFilter_->SetHint("Filter TXI directives, value types, defaults, or behavior...");
         catalog_ = new wxTextCtrl(page, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize,
                                   wxTE_MULTILINE | wxTE_READONLY | wxTE_DONTWRAP);
         root->Add(catalogFilter_, 0, wxEXPAND | wxALL, FromDIP(8));
         root->Add(catalog_, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(8));
         page->SetSizer(root);
-        notebook_->AddPage(page, "TXI reference", false);
+        notebook_->AddPage(page, "TXI dictionary", false);
         catalogFilter_->Bind(wxEVT_TEXT, [this](wxCommandEvent&) { refreshCatalog(); });
     }
 
@@ -630,7 +761,9 @@ private:
                             wxpath::toWx(suggestedName), saveWildcard(), wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
         if (dialog.ShowModal() != wxID_OK) return false;
         auto output = wxpath::fromWx(dialog.GetPath());
+#if !defined(__EMSCRIPTEN__)
         if (output.extension().empty()) output += extensionForFilter(dialog.GetFilterIndex());
+#endif
         const auto extension = neotpc::texture::extensionLower(output);
         if ((extension == "jpg" || extension == "jpeg" || extension == "jpe") && document_.texture().hasAlpha &&
             !wxui::confirm(this, "JPEG discards alpha", "JPEG output cannot preserve transparency. Continue?")) {
@@ -666,7 +799,9 @@ private:
                             wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
         if (dialog.ShowModal() != wxID_OK) return;
         auto outputTga = wxpath::fromWx(dialog.GetPath());
+#if !defined(__EMSCRIPTEN__)
         if (outputTga.extension().empty()) outputTga.replace_extension(".tga");
+#endif
         auto outputTxi = outputTga;
         outputTxi.replace_extension(".txi");
 
@@ -724,7 +859,9 @@ private:
                                   wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
         if (outputDialog.ShowModal() != wxID_OK) return;
         auto outputTpc = wxpath::fromWx(outputDialog.GetPath());
+#if !defined(__EMSCRIPTEN__)
         if (outputTpc.extension().empty()) outputTpc.replace_extension(".tpc");
+#endif
 
         neotpc::texture::TextureSaveOptions initialOptions;
         if (document_.isOpen()) initialOptions = document_.saveOptions();
@@ -774,7 +911,9 @@ private:
                             wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
         if (dialog.ShowModal() != wxID_OK) return;
         auto output = wxpath::fromWx(dialog.GetPath());
+#if !defined(__EMSCRIPTEN__)
         if (output.extension().empty()) output.replace_extension(".txi");
+#endif
         try {
             neotpc::texture::saveTexture(document_.texture(), output);
             wxui::setStatusText(*this, wxString("Exported TXI to ") + wxpath::toWx(output), 0);
@@ -796,6 +935,9 @@ private:
 
     void closeTexture() {
         if (!maybeSave()) return;
+#if defined(__EMSCRIPTEN__)
+        cancelBrowserComparisonLoad(false, true);
+#endif
         document_.close();
         comparisonImages_.clear();
         rebuildComparisonWorkspace();
@@ -810,15 +952,413 @@ private:
 
     void openConflictingImages() {
         if (!document_.isOpen()) return;
+#if defined(__EMSCRIPTEN__)
+        requestBrowserComparisonFiles();
+#else
+        openConflictingImagesFromPaths(
+            neotpc::texture::findConflictingTexturePaths(document_.path()));
+#endif
+    }
+
+#if defined(__EMSCRIPTEN__)
+    void requestBrowserComparisonFiles() {
+        if (browserComparison_) return;
+        const std::uint64_t request = ++browserComparisonGeneration_;
+        wxWeakRef<MainFrame> weak(this);
+        neobrowser::requestRetainedFiles(
+            "Select conflicting texture images", browserComparisonAccept(), true,
+            [weak, request](neobrowser::RetainedFileSetResult result) mutable {
+                if (!weak) {
+                    if (result.sessionId != 0) neobrowser::releaseRetainedFileSet(result.sessionId);
+                    return;
+                }
+                auto* frame = weak.get();
+                if (frame->browserComparisonGeneration_ != request || !frame->document_.isOpen()) {
+                    if (result.sessionId != 0) neobrowser::releaseRetainedFileSet(result.sessionId);
+                    return;
+                }
+                frame->beginBrowserComparison(std::move(result));
+            });
+    }
+
+    void beginBrowserComparison(neobrowser::RetainedFileSetResult result) {
+        if (!result.error.empty()) {
+            if (result.sessionId != 0) neobrowser::releaseRetainedFileSet(result.sessionId);
+            wxMessageBox(wxui::toWx(result.error), "Open Conflicting Images",
+                         wxOK | wxICON_ERROR, this);
+            return;
+        }
+        if (result.cancelled()) return;
+        if (result.sessionId == 0 || result.files.empty()) {
+            if (result.sessionId != 0) neobrowser::releaseRetainedFileSet(result.sessionId);
+            wxMessageBox("No additional conflicting images were selected.",
+                         "Open Conflicting Images", wxOK | wxICON_INFORMATION, this);
+            return;
+        }
+        if (result.files.size() > kBrowserComparisonMaxSelectedFiles) {
+            neobrowser::releaseRetainedFileSet(result.sessionId);
+            wxMessageBox(
+                wxString::Format("Select at most %llu texture and TXI files for one comparison.",
+                                 static_cast<unsigned long long>(kBrowserComparisonMaxSelectedFiles)),
+                "Comparison Selection Too Large", wxOK | wxICON_ERROR, this);
+            return;
+        }
+
+        struct IndexedFile {
+            neobrowser::RetainedFileInfo file;
+            fs::path relative;
+        };
+
+        std::vector<IndexedFile> indexed;
+        indexed.reserve(result.files.size());
+        std::unordered_map<std::string, std::size_t> byPath;
+        std::vector<std::string> failures;
+        for (auto& file : result.files) {
+            if (file.fileId == 0) {
+                failures.push_back("A selected browser file has no retained-file identifier");
+                continue;
+            }
+            std::string pathError;
+            const auto relative = normalizeBrowserComparisonPath(file.relativePath, pathError);
+            if (!relative) {
+                failures.push_back(pathError);
+                continue;
+            }
+            const std::string extension = neotpc::texture::extensionLower(*relative);
+            if (!isBrowserComparisonPixelExtension(extension) && extension != "txi") continue;
+            const std::uint64_t maximum = extension == "txi"
+                ? static_cast<std::uint64_t>(kBrowserComparisonMaxTxiBytes)
+                : static_cast<std::uint64_t>(kBrowserComparisonMaxTextureBytes);
+            if (file.size > maximum) {
+                failures.push_back(neotpc::texture::genericPathToUtf8(*relative) +
+                                   ": exceeds the per-file browser comparison limit");
+                continue;
+            }
+            const std::string key = browserComparisonPathKey(*relative);
+            if (byPath.find(key) != byPath.end()) {
+                failures.push_back(neotpc::texture::genericPathToUtf8(*relative) +
+                                   ": duplicates another selected path ignoring case");
+                continue;
+            }
+            const std::size_t index = indexed.size();
+            indexed.push_back(IndexedFile{std::move(file), *relative});
+            byPath.emplace(key, index);
+        }
+
+        std::vector<std::size_t> pixelIndices;
+        pixelIndices.reserve(indexed.size());
+        const std::string currentLeaf = neotpc::texture::asciiLower(
+            neotpc::texture::pathToUtf8(document_.path().filename()));
+        for (std::size_t index = 0; index < indexed.size(); ++index) {
+            const auto& entry = indexed[index];
+            const std::string extension = neotpc::texture::extensionLower(entry.relative);
+            if (!isBrowserComparisonPixelExtension(extension)) continue;
+            const std::string leaf = neotpc::texture::asciiLower(
+                neotpc::texture::pathToUtf8(entry.relative.filename()));
+            if (leaf == currentLeaf) continue;
+            pixelIndices.push_back(index);
+        }
+        std::sort(pixelIndices.begin(), pixelIndices.end(), [&indexed](std::size_t left, std::size_t right) {
+            return browserComparisonPathKey(indexed[left].relative) <
+                   browserComparisonPathKey(indexed[right].relative);
+        });
+
+        std::vector<BrowserComparisonCandidate> candidates;
+        std::vector<std::uint32_t> retainedIds;
+        std::unordered_set<std::uint32_t> retainedIdSet;
+        std::uint64_t aggregateBytes = 0;
+        const std::size_t attemptCount = std::min(pixelIndices.size(), kBrowserComparisonMaxImages);
+        candidates.reserve(attemptCount);
+        for (std::size_t ordinal = 0; ordinal < attemptCount; ++ordinal) {
+            const auto& entry = indexed[pixelIndices[ordinal]];
+            BrowserComparisonCandidate candidate;
+            candidate.source = entry.file;
+            candidate.relativePath = entry.relative;
+
+            fs::path sidecarPath = entry.relative;
+            sidecarPath.replace_extension(".txi");
+            const auto sidecar = byPath.find(browserComparisonPathKey(sidecarPath));
+            if (sidecar != byPath.end()) candidate.sidecar = indexed[sidecar->second].file;
+
+            std::uint64_t itemBytes = candidate.source.size;
+            if (candidate.sidecar) {
+                if (candidate.sidecar->size > kBrowserComparisonMaxAggregateInputBytes - itemBytes) {
+                    failures.push_back(neotpc::texture::genericPathToUtf8(entry.relative) +
+                                       ": source and TXI sidecar exceed the comparison input limit");
+                    continue;
+                }
+                itemBytes += candidate.sidecar->size;
+            }
+            if (itemBytes > kBrowserComparisonMaxAggregateInputBytes - aggregateBytes) {
+                failures.push_back(std::to_string(attemptCount - ordinal) +
+                                   " image(s) skipped at the aggregate comparison input limit");
+                break;
+            }
+            aggregateBytes += itemBytes;
+            if (retainedIdSet.insert(candidate.source.fileId).second) {
+                retainedIds.push_back(candidate.source.fileId);
+            }
+            if (candidate.sidecar && retainedIdSet.insert(candidate.sidecar->fileId).second) {
+                retainedIds.push_back(candidate.sidecar->fileId);
+            }
+            candidates.push_back(std::move(candidate));
+        }
+        if (pixelIndices.size() > attemptCount) {
+            failures.push_back(std::to_string(pixelIndices.size() - attemptCount) +
+                               " additional image(s) skipped at the 16-pane browser limit");
+        }
+
+        if (candidates.empty()) {
+            neobrowser::releaseRetainedFileSet(result.sessionId);
+            std::string message = "No additional conflicting images could be loaded.";
+            if (!failures.empty()) {
+                message += "\n\n";
+                for (const auto& failure : failures) message += failure + '\n';
+            }
+            wxMessageBox(wxui::toWx(message), "Open Conflicting Images",
+                         wxOK | (failures.empty() ? wxICON_INFORMATION : wxICON_WARNING), this);
+            return;
+        }
+
+        // Drop an existing decoded comparison before building its replacement so
+        // two complete comparison working sets never coexist in browser memory.
+        comparisonImages_.clear();
+        rebuildComparisonWorkspace();
+        refreshPreview();
+
+        neobrowser::retainOnlyRetainedFiles(result.sessionId, retainedIds);
+        auto state = std::make_unique<BrowserComparisonState>();
+        state->generation = browserComparisonGeneration_;
+        state->sessionId = result.sessionId;
+        state->candidates = std::move(candidates);
+        state->failures = std::move(failures);
+        state->progress = std::make_unique<wxProgressDialog>(
+            "Open Conflicting Images", "Preparing comparison images...",
+            static_cast<int>(state->candidates.size()), this,
+            wxPD_CAN_ABORT | wxPD_APP_MODAL | wxPD_ELAPSED_TIME | wxPD_REMAINING_TIME);
+        browserComparison_ = std::move(state);
+        updateWindowState();
+        wxWeakRef<MainFrame> weak(this);
+        const std::uint64_t generation = browserComparison_->generation;
+        wxTheApp->CallAfter([weak, generation]() {
+            if (!weak || !weak->browserComparison_ ||
+                weak->browserComparison_->generation != generation) return;
+            weak->continueBrowserComparisonLoad();
+        });
+    }
+
+    void continueBrowserComparisonLoad() {
+        if (!browserComparison_) return;
+        if (browserComparison_->index >= browserComparison_->candidates.size()) {
+            finishBrowserComparisonLoad(false);
+            return;
+        }
+
+        const auto& candidate = browserComparison_->candidates[browserComparison_->index];
+        const wxString displayName = wxpath::toWx(candidate.relativePath.filename());
+        if (browserComparison_->progress &&
+            !browserComparison_->progress->Update(
+                static_cast<int>(browserComparison_->index), wxString("Reading ") + displayName)) {
+            finishBrowserComparisonLoad(true);
+            return;
+        }
+        wxui::setStatusText(*this,
+            wxString::Format("Comparison %llu/%llu: reading %s",
+                             static_cast<unsigned long long>(browserComparison_->index + 1),
+                             static_cast<unsigned long long>(browserComparison_->candidates.size()),
+                             displayName.c_str()), 0);
+
+        const std::uint64_t generation = browserComparison_->generation;
+        wxWeakRef<MainFrame> weak(this);
+        browserComparison_->activeReadRequest = browser::requestRetainedFileBytes(
+            browserComparison_->sessionId, candidate.source.fileId, candidate.source.size,
+            kBrowserComparisonMaxTextureBytes,
+            [weak, generation](browser::RetainedReadResult result) mutable {
+                if (!weak) return;
+                weak->handleBrowserComparisonSource(
+                    generation, std::move(result.bytes), std::move(result.error));
+            });
+    }
+
+    void handleBrowserComparisonSource(std::uint64_t generation,
+                                       std::vector<std::uint8_t> bytes,
+                                       std::string error) {
+        if (!browserComparison_ || browserComparison_->generation != generation) return;
+        browserComparison_->activeReadRequest = 0;
+        if (!error.empty()) {
+            completeBrowserComparisonItem(std::move(error));
+            return;
+        }
+        browserComparison_->sourceBytes = std::move(bytes);
+        const auto& candidate = browserComparison_->candidates[browserComparison_->index];
+        if (!candidate.sidecar) {
+            scheduleBrowserComparisonDecode(generation);
+            return;
+        }
+
+        wxWeakRef<MainFrame> weak(this);
+        browserComparison_->activeReadRequest = browser::requestRetainedFileBytes(
+            browserComparison_->sessionId, candidate.sidecar->fileId, candidate.sidecar->size,
+            kBrowserComparisonMaxTxiBytes,
+            [weak, generation](browser::RetainedReadResult result) mutable {
+                if (!weak) return;
+                weak->handleBrowserComparisonSidecar(
+                    generation, std::move(result.bytes), std::move(result.error));
+            });
+    }
+
+    void handleBrowserComparisonSidecar(std::uint64_t generation,
+                                        std::vector<std::uint8_t> bytes,
+                                        std::string error) {
+        if (!browserComparison_ || browserComparison_->generation != generation) return;
+        browserComparison_->activeReadRequest = 0;
+        if (!error.empty()) {
+            completeBrowserComparisonItem(std::move(error));
+            return;
+        }
+        browserComparison_->sidecarTxi.assign(bytes.begin(), bytes.end());
+        scheduleBrowserComparisonDecode(generation);
+    }
+
+    void scheduleBrowserComparisonDecode(std::uint64_t generation) {
+        wxWeakRef<MainFrame> weak(this);
+        wxTheApp->CallAfter([weak, generation]() {
+            if (!weak || !weak->browserComparison_ ||
+                weak->browserComparison_->generation != generation) return;
+            weak->decodeBrowserComparisonItem(generation);
+        });
+    }
+
+    void decodeBrowserComparisonItem(std::uint64_t generation) {
+        if (!browserComparison_ || browserComparison_->generation != generation ||
+            browserComparison_->index >= browserComparison_->candidates.size()) return;
+        const auto candidate = browserComparison_->candidates[browserComparison_->index];
         try {
-            const auto paths = neotpc::texture::findConflictingTexturePaths(document_.path());
+            if (browserComparison_->progress &&
+                !browserComparison_->progress->Pulse(
+                    wxString("Decoding ") + wxpath::toWx(candidate.relativePath.filename()))) {
+                finishBrowserComparisonLoad(true);
+                return;
+            }
+            if (browserComparison_->decodedBytes >= kBrowserComparisonMaxDecodedBytes) {
+                completeBrowserComparisonItem("comparison decoded-memory limit reached");
+                return;
+            }
+            const std::uint64_t remainingDecoded =
+                kBrowserComparisonMaxDecodedBytes - browserComparison_->decodedBytes;
+            neotpc::texture::parser::ScopedResourceLimits limits(
+                kBrowserComparisonMaxTextureBytes, remainingDecoded);
+            auto texture = neotpc::texture::loadTextureBytes(
+                browserComparison_->sourceBytes, candidate.relativePath,
+                std::move(browserComparison_->sidecarTxi));
+            std::vector<std::uint8_t>().swap(browserComparison_->sourceBytes);
+            browserComparison_->sidecarTxi.clear();
+
+            if (!texture.hasPixels()) {
+                completeBrowserComparisonItem("no pixel data");
+                return;
+            }
+            const std::uint64_t imageBytes = decodedTextureBytes(texture);
+            if (imageBytes > remainingDecoded) {
+                completeBrowserComparisonItem("comparison decoded-memory limit reached");
+                return;
+            }
+            browserComparison_->decodedBytes += imageBytes;
+            browserComparison_->loaded.push_back(
+                ComparisonImage{candidate.relativePath, std::move(texture), nullptr, nullptr});
+            completeBrowserComparisonItem({});
+        } catch (const std::exception& error) {
+            std::vector<std::uint8_t>().swap(browserComparison_->sourceBytes);
+            browserComparison_->sidecarTxi.clear();
+            completeBrowserComparisonItem(error.what());
+        }
+    }
+
+    void completeBrowserComparisonItem(std::string failure) {
+        if (!browserComparison_ ||
+            browserComparison_->index >= browserComparison_->candidates.size()) return;
+        const auto path = browserComparison_->candidates[browserComparison_->index].relativePath;
+        if (!failure.empty()) {
+            browserComparison_->failures.push_back(
+                neotpc::texture::genericPathToUtf8(path) + ": " + std::move(failure));
+        }
+        std::vector<std::uint8_t>().swap(browserComparison_->sourceBytes);
+        browserComparison_->sidecarTxi.clear();
+        ++browserComparison_->index;
+        const std::uint64_t generation = browserComparison_->generation;
+        wxWeakRef<MainFrame> weak(this);
+        wxTheApp->CallAfter([weak, generation]() {
+            if (!weak || !weak->browserComparison_ ||
+                weak->browserComparison_->generation != generation) return;
+            weak->continueBrowserComparisonLoad();
+        });
+    }
+
+    void finishBrowserComparisonLoad(bool cancelled) {
+        if (!browserComparison_) return;
+        auto state = std::move(browserComparison_);
+        if (state->activeReadRequest != 0) {
+            browser::cancelRetainedFileRead(state->activeReadRequest);
+        }
+        if (state->sessionId != 0) neobrowser::releaseRetainedFileSet(state->sessionId);
+        if (cancelled) state->failures.push_back("Comparison loading was cancelled");
+        if (state->progress) {
+            if (!cancelled) {
+                state->progress->Update(
+                    static_cast<int>(state->candidates.size()), "Comparison images loaded");
+            }
+            state->progress.reset();
+        }
+
+        comparisonImages_ = std::move(state->loaded);
+        rebuildComparisonWorkspace();
+        refreshPreview();
+        updateWindowState();
+        Layout();
+
+        if (comparisonImages_.empty() && state->failures.empty()) {
+            wxMessageBox("No additional conflicting images were selected.",
+                         "Open Conflicting Images", wxOK | wxICON_INFORMATION, this);
+        } else if (!state->failures.empty()) {
+            std::string message = "Opened " + std::to_string(comparisonImages_.size()) +
+                                  " conflicting image(s). The following selection(s) were not previewed:\n\n";
+            for (const auto& failure : state->failures) message += failure + '\n';
+            wxMessageBox(wxui::toWx(message), "Open Conflicting Images",
+                         wxOK | wxICON_WARNING, this);
+        }
+        if (comparisonImages_.empty()) {
+            wxui::setStatusText(*this,
+                state->failures.empty() ? "No conflicting images found" :
+                                          "No conflicting images could be previewed", 0);
+        } else {
+            wxui::setStatusText(*this,
+                wxString::Format("Comparison view: %llu image pane(s)",
+                                 static_cast<unsigned long long>(comparisonImages_.size() + 1)), 0);
+        }
+    }
+
+    void cancelBrowserComparisonLoad(bool announce, bool refreshState) {
+        ++browserComparisonGeneration_;
+        if (!browserComparison_) return;
+        auto state = std::move(browserComparison_);
+        if (state->activeReadRequest != 0) {
+            browser::cancelRetainedFileRead(state->activeReadRequest);
+        }
+        if (state->sessionId != 0) neobrowser::releaseRetainedFileSet(state->sessionId);
+        state->progress.reset();
+        if (announce) wxui::setStatusText(*this, "Comparison loading cancelled", 0);
+        if (refreshState) updateWindowState();
+    }
+#else
+    void openConflictingImagesFromPaths(std::vector<fs::path> paths) {
+        try {
             std::vector<fs::path> candidates;
             candidates.reserve(paths.size());
-            for (const auto& path : paths) {
+            for (auto& path : paths) {
                 std::error_code equivalentError;
                 const bool sameFile = fs::equivalent(path, document_.path(), equivalentError);
                 if ((!equivalentError && sameFile) || path == document_.path()) continue;
-                candidates.push_back(path);
+                candidates.push_back(std::move(path));
             }
 
             constexpr std::size_t kMaxComparisonImages = 64;
@@ -861,8 +1401,6 @@ private:
                             if (!cancelRequested) {
                                 if (!progress.Pulse(wxString("Opening ") + displayName)) cancelRequested = true;
                             } else {
-                                // The parser has no unsafe forced-cancellation path. Keep the UI
-                                // responsive while the in-flight bounded decode finishes.
                                 wxYieldIfNeeded();
                             }
                         }
@@ -919,7 +1457,9 @@ private:
                 wxMessageBox(wxui::toWx(message), "Open Conflicting Images", wxOK | wxICON_WARNING, this);
             }
             if (comparisonImages_.empty()) {
-                wxui::setStatusText(*this, failures.empty() ? "No conflicting images found" : "No conflicting images could be previewed", 0);
+                wxui::setStatusText(*this,
+                    failures.empty() ? "No conflicting images found" :
+                                       "No conflicting images could be previewed", 0);
             } else {
                 wxui::setStatusText(*this,
                     wxString::Format("Comparison view: %llu image pane(s)",
@@ -929,8 +1469,14 @@ private:
             wxui::showError(this, error);
         }
     }
+#endif
 
     void closeImageComparison() {
+#if defined(__EMSCRIPTEN__)
+        const bool wasLoading = browserComparison_ != nullptr;
+        cancelBrowserComparisonLoad(wasLoading, true);
+        if (wasLoading && comparisonImages_.empty()) return;
+#endif
         if (comparisonImages_.empty()) return;
         comparisonImages_.clear();
         rebuildComparisonWorkspace();
@@ -1150,6 +1696,11 @@ private:
     void updateWindowState() {
         const bool open = document_.isOpen();
         const bool pixels = open && document_.texture().hasPixels();
+#if defined(__EMSCRIPTEN__)
+        const bool comparisonLoading = browserComparison_ != nullptr;
+#else
+        const bool comparisonLoading = false;
+#endif
         wxString name = open ? wxpath::toWx(document_.path().filename()) : wxString("Untitled");
         if (!comparisonImages_.empty()) {
             name += wxString::Format(" + %llu conflict(s)",
@@ -1157,18 +1708,19 @@ private:
         }
         if (document_.dirty()) name += " *";
         SetTitle(name + " - NeoTPC");
-        for (int id : {ID_SAVE_AS, ID_CLOSE_TEXTURE, ID_OPEN_CONFLICTS, ID_IMPORT_TXI, ID_EXPORT_TXI}) {
+        for (int id : {ID_SAVE_AS, ID_CLOSE_TEXTURE, ID_IMPORT_TXI, ID_EXPORT_TXI}) {
             GetMenuBar()->Enable(id, open);
         }
+        GetMenuBar()->Enable(ID_OPEN_CONFLICTS, open && !comparisonLoading);
         GetMenuBar()->Enable(ID_SPLIT_TPC,
             open && pixels && document_.texture().kind == neotpc::texture::TextureFileKind::Tpc);
         GetMenuBar()->Enable(ID_COMBINE_TGA_TXI, true);
-        GetMenuBar()->Enable(ID_CLOSE_CONFLICTS, !comparisonImages_.empty());
+        GetMenuBar()->Enable(ID_CLOSE_CONFLICTS, comparisonLoading || !comparisonImages_.empty());
         GetMenuBar()->Enable(wxID_SAVE, open && document_.dirty());
         if (txiEditor_ != nullptr) txiEditor_->Enable(open);
         if (auto* importButton = FindWindow(ID_IMPORT_TXI)) importButton->Enable(open);
         if (auto* exportButton = FindWindow(ID_EXPORT_TXI)) exportButton->Enable(open);
-        if (conflictButton_ != nullptr) conflictButton_->Enable(open);
+        if (conflictButton_ != nullptr) conflictButton_->Enable(open && !comparisonLoading);
         for (int id : {ID_FIT_IMAGE, ID_ACTUAL_SIZE, ID_ZOOM_IN, ID_ZOOM_OUT,
                        ID_SET_ALPHA, ID_SCALE_ALPHA, ID_INVERT_ALPHA, ID_FLIP_HORIZONTAL, ID_FLIP_VERTICAL}) {
             GetMenuBar()->Enable(id, pixels);
@@ -1258,6 +1810,7 @@ private:
         wxui::writeDarkMode(kAppName, darkMode_);
         wxui::applyTheme(this, darkMode_);
         txiEditor_->applyTheme(darkMode_);
+        applyTxiHintTheme();
         applyToPreviewCanvases([this](auto& canvas) { canvas.setDarkMode(darkMode_); });
     }
 
@@ -1272,6 +1825,9 @@ private:
 
     void onCloseWindow(wxCloseEvent& event) {
         if (!event.CanVeto()) {
+#if defined(__EMSCRIPTEN__)
+            cancelBrowserComparisonLoad(false, true);
+#endif
             settings_.saveWindowPlacement(*this);
             event.Skip();
             return;
@@ -1280,6 +1836,9 @@ private:
             event.Veto();
             return;
         }
+#if defined(__EMSCRIPTEN__)
+        cancelBrowserComparisonLoad(false, true);
+#endif
         settings_.saveWindowPlacement(*this);
         event.Skip();
     }
@@ -1290,6 +1849,10 @@ private:
     wxPanel* previewHost_ = nullptr;
     wxBoxSizer* previewHostSizer_ = nullptr;
     std::vector<ComparisonImage> comparisonImages_;
+#if defined(__EMSCRIPTEN__)
+    std::unique_ptr<BrowserComparisonState> browserComparison_;
+    std::uint64_t browserComparisonGeneration_ = 0;
+#endif
     std::vector<std::pair<wxSplitterWindow*, bool>> comparisonSplitters_;
     wxNotebook* notebook_ = nullptr;
     wxChoice* layerChoice_ = nullptr;

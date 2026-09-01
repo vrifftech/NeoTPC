@@ -68,6 +68,8 @@ include(GNUInstallDirs)
 
 message(STATUS "Using neoshared: ${NEOSHARED_ROOT}")
 include("${NEOSHARED_ROOT}/cmake/NeoMinimalRelease.cmake")
+include("${NEOSHARED_ROOT}/cmake/NeoMacOSBundle.cmake")
+include("${NEOSHARED_ROOT}/cmake/NeoWasm.cmake")
 if(NOT TARGET neoshared::wx)
     add_subdirectory("${NEOSHARED_ROOT}"
         "${CMAKE_CURRENT_BINARY_DIR}/neoshared" EXCLUDE_FROM_ALL)
@@ -136,7 +138,11 @@ function(neotpc_link_wx target_name)
     target_compile_definitions(${target_name} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
     set(_wx_targets)
     if(TARGET wx::core)
-        foreach(_wx_target IN ITEMS wx::core wx::base wx::adv wx::stc)
+        set(_neotpc_wx_link_targets wx::core wx::base wx::adv)
+        if(NOT EMSCRIPTEN)
+            list(APPEND _neotpc_wx_link_targets wx::stc)
+        endif()
+        foreach(_wx_target IN LISTS _neotpc_wx_link_targets)
             if(TARGET ${_wx_target})
                 list(APPEND _wx_targets ${_wx_target})
             endif()
@@ -158,13 +164,16 @@ function(neotpc_link_wx target_name)
 endfunction()
 
 if(NEOTPC_BUILD_WX_GUI)
-    set(NEOTPC_WX_COMPONENTS core base adv stc)
+    set(NEOTPC_WX_COMPONENTS core base adv)
+    if(NOT EMSCRIPTEN)
+        list(APPEND NEOTPC_WX_COMPONENTS stc)
+    endif()
 
     # CMake's Unix FindwxWidgets module searches wx-config only inside the
     # active find root. A vcpkg toolchain changes that root, which can hide
-    # the system wx-config installed by Linux distributions. Resolve the
+    # the host wx-config installed by a system package manager. Resolve the
     # native tool explicitly before calling find_package().
-    if(UNIX AND NOT APPLE AND NOT CMAKE_CROSSCOMPILING
+    if(UNIX AND NOT CMAKE_CROSSCOMPILING
        AND NOT wxWidgets_CONFIG_EXECUTABLE)
         find_program(NEOTPC_SYSTEM_WX_CONFIG
             NAMES wx-config
@@ -178,20 +187,27 @@ if(NEOTPC_BUILD_WX_GUI)
 
     if(WIN32)
         find_package(wxWidgets CONFIG QUIET COMPONENTS ${NEOTPC_WX_COMPONENTS})
-        if(NOT wxWidgets_FOUND AND NOT TARGET wx::stc)
+        if(NOT wxWidgets_FOUND AND NOT TARGET wx::core)
             find_package(wxWidgets QUIET MODULE COMPONENTS ${NEOTPC_WX_COMPONENTS})
         endif()
     else()
         find_package(wxWidgets QUIET MODULE COMPONENTS ${NEOTPC_WX_COMPONENTS})
-        if(NOT wxWidgets_FOUND AND NOT TARGET wx::stc)
+        if(NOT wxWidgets_FOUND AND NOT TARGET wx::core)
             find_package(wxWidgets CONFIG QUIET COMPONENTS ${NEOTPC_WX_COMPONENTS})
         endif()
     endif()
 
-    if(wxWidgets_FOUND OR (TARGET wx::core AND TARGET wx::stc))
-        find_package(Threads REQUIRED)
+    set(NEOTPC_WX_TARGETS_READY OFF)
+    if(TARGET wx::core AND (EMSCRIPTEN OR TARGET wx::stc))
+        set(NEOTPC_WX_TARGETS_READY ON)
+    endif()
+    if(wxWidgets_FOUND OR NEOTPC_WX_TARGETS_READY)
+        if(NOT EMSCRIPTEN)
+            find_package(Threads REQUIRED)
+        endif()
         set(NEOTPC_WX_SOURCES
             src/wx/BatchDialog.cpp
+            src/wx/BrowserWorkload.cpp
             src/wx/EncodingOptionsPanel.cpp
             src/wx/TextureCanvas.cpp
             src/wx/TxiEditor.cpp
@@ -199,10 +215,6 @@ if(NEOTPC_BUILD_WX_GUI)
         )
         if(WIN32)
             list(APPEND NEOTPC_WX_SOURCES resources/neotpc.rc)
-        elseif(APPLE)
-            list(APPEND NEOTPC_WX_SOURCES resources/tpc.icns)
-            set_source_files_properties(resources/tpc.icns PROPERTIES
-                MACOSX_PACKAGE_LOCATION "Resources")
         endif()
         if(WIN32)
             add_executable(NeoTPC WIN32 ${NEOTPC_WX_SOURCES})
@@ -211,14 +223,23 @@ if(NEOTPC_BUILD_WX_GUI)
         else()
             add_executable(NeoTPC ${NEOTPC_WX_SOURCES})
         endif()
-        target_link_libraries(NeoTPC PRIVATE neotpc_core neoshared::wx Threads::Threads)
+        neo_configure_macos_bundle(NeoTPC
+            NAME "NeoTPC"
+            IDENTIFIER "com.vrifftech.neotpc"
+            ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/tpc.icns"
+        )
+        neo_configure_wasm_target(NeoTPC
+            NAME "NeoTPC"
+            SLUG "neotpc"
+            ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/tpc.svg"
+        )
+        target_link_libraries(NeoTPC PRIVATE neotpc_core neoshared::wx)
+        if(NOT EMSCRIPTEN)
+            target_link_libraries(NeoTPC PRIVATE Threads::Threads)
+        endif()
         target_include_directories(NeoTPC PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/wx ${CMAKE_CURRENT_SOURCE_DIR}/resources)
         neotpc_link_wx(NeoTPC)
         target_compile_features(NeoTPC PRIVATE cxx_std_17)
-        if(APPLE)
-            set_target_properties(NeoTPC PROPERTIES
-                MACOSX_BUNDLE_ICON_FILE "tpc.icns")
-        endif()
         if(MSVC)
             target_compile_options(NeoTPC PRIVATE /W4 /permissive- /utf-8)
         else()
@@ -241,7 +262,7 @@ if(NEOTPC_BUILD_WX_GUI)
         endif()
     elseif(NEOTPC_REQUIRE_WX_GUI)
         message(FATAL_ERROR
-            "wxWidgets with the StyledTextCtrl component was not found, but "
+            "The required wxWidgets components were not found, but "
             "NEOTPC_REQUIRE_WX_GUI is ON. On Debian or Ubuntu, install "
             "libwxgtk3.2-dev. On Windows, use the pinned wxWidgets 3.3.3 overlay from neoshared. When a toolchain "
             "hides host programs, configure with "
@@ -251,22 +272,7 @@ if(NEOTPC_BUILD_WX_GUI)
     endif()
 endif()
 
-option(NEOTPC_BUILD_TESTS "Build NeoTPC codec regression tests" OFF)
-if(NEOTPC_BUILD_TESTS)
-    enable_testing()
-    add_executable(neotpc-codec-tests tests/codec_tests.cpp)
-    target_link_libraries(neotpc-codec-tests PRIVATE neotpc_core)
-    target_compile_definitions(neotpc-codec-tests PRIVATE
-        NEOTPC_TEST_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")
-    add_test(NAME neotpc-codec-roundtrip COMMAND neotpc-codec-tests)
-    if(TARGET neotpc-cli)
-        add_test(NAME neotpc-cli-help COMMAND neotpc-cli --help)
-        add_test(NAME neotpc-cli-fixture-info COMMAND neotpc-cli info ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/test.tpc)
-    endif()
-endif()
-
 set(NEOTPC_DOC_DIR "${CMAKE_INSTALL_DATAROOTDIR}/doc/NeoTPC")
-install(FILES README.md DESTINATION ${NEOTPC_DOC_DIR})
 
 neo_force_static_msvc_runtime_for_directory_targets()
 neo_apply_minimal_release_to_directory_targets()

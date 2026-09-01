@@ -1,0 +1,133 @@
+name: WebAssembly / GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  repository_dispatch:
+    types: [neoshared-updated]
+  workflow_dispatch:
+    inputs:
+      neoshared_ref:
+        description: neoshared branch, tag, or commit SHA (blank uses NEOSHARED_REF or main)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NEOSHARED_REF: ${{ github.event.client_payload.neoshared_ref || inputs.neoshared_ref || vars.NEOSHARED_REF || 'main' }}
+  NEO_WASM_EMSCRIPTEN_VERSION: '4.0.2'
+  NEO_WASM_WX_COMMIT: 'bca69b9fddc88adec57b05e6809467ef9f5158c8'
+  VCPKG_TARGET_TRIPLET: wasm32-emscripten
+  VCPKG_DISABLE_METRICS: '1'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Check out NeoTPC
+        uses: actions/checkout@v7
+        with:
+          path: tool
+          persist-credentials: false
+
+      - name: Read pinned vcpkg baseline
+        id: vcpkg-baseline
+        run: |
+          baseline="$(python3 -c 'import json; print(json.load(open("tool/vcpkg.json", encoding="utf-8"))["builtin-baseline"])')"
+          test -n "$baseline"
+          echo "sha=$baseline" >> "$GITHUB_OUTPUT"
+
+      - name: Check out neoshared
+        uses: actions/checkout@v7
+        with:
+          repository: vrifftech/neoshared
+          ref: ${{ env.NEOSHARED_REF }}
+          path: neoshared
+          persist-credentials: false
+
+
+      - name: Check out pinned vcpkg
+        uses: actions/checkout@v7
+        with:
+          repository: microsoft/vcpkg
+          ref: ${{ steps.vcpkg-baseline.outputs.sha }}
+          path: vcpkg
+          persist-credentials: false
+
+      - name: Install build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y build-essential autoconf automake libtool libtool-bin make ninja-build cmake python3 git pkg-config curl zip unzip tar
+
+      - name: Restore Emscripten, wxWidgets-WASM, and vcpkg caches
+        uses: actions/cache@v6
+        with:
+          path: |
+            .neo-wasm-deps/emsdk
+            .neo-wasm-deps/wxwidgets-wasm
+            .neo-wasm-deps/wxwidgets-wasm-build
+            .neo-wasm-deps/neo-wasm-versions.env
+            .neo-wasm-deps/vcpkg-installed
+            .neo-wasm-deps/vcpkg-binary-cache
+            vcpkg/downloads
+          key: neotpc-wasm-${{ runner.os }}-${{ env.NEO_WASM_EMSCRIPTEN_VERSION }}-${{ env.NEO_WASM_WX_COMMIT }}-${{ steps.vcpkg-baseline.outputs.sha }}-${{ hashFiles('tool/vcpkg.json', 'neoshared/scripts/setup-wasm.sh', 'neoshared/scripts/build-wx-wasm.sh', 'neoshared/scripts/build-wasm-app.sh') }}
+
+      - name: Bootstrap vcpkg
+        run: bash ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
+
+      - name: Build browser application
+        working-directory: tool
+        env:
+          VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/.neo-wasm-deps/vcpkg-binary-cache
+        run: |
+          mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
+          bash ./scripts/build-wasm.sh \
+            --neoshared-root ../neoshared \
+            --deps-root ../.neo-wasm-deps \
+            --vcpkg-root ../vcpkg \
+            --vcpkg-installed-dir ../.neo-wasm-deps/vcpkg-installed \
+            --jobs 2 \
+            --clean
+
+      - name: Validate static site
+        run: |
+          test -f tool/dist-wasm/index.html
+          test -f tool/dist-wasm/neotpc.js
+          test -f tool/dist-wasm/neotpc.wasm
+          grep -q 'NeoTPC' tool/dist-wasm/index.html
+
+      - name: Configure GitHub Pages
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: actions/configure-pages@v6
+
+      - name: Upload Pages artifact
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: tool/dist-wasm
+
+  deploy:
+    if: ${{ github.event_name != 'pull_request' }}
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-24.04
+    needs: build
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
