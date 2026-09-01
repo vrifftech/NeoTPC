@@ -80,7 +80,7 @@ jobs:
             .neo-wasm-deps/vcpkg-installed
             .neo-wasm-deps/vcpkg-binary-cache
             vcpkg/downloads
-          key: neotpc-wasm-${{ runner.os }}-${{ env.NEO_WASM_EMSCRIPTEN_VERSION }}-${{ env.NEO_WASM_WX_COMMIT }}-${{ steps.vcpkg-baseline.outputs.sha }}-${{ hashFiles('tool/vcpkg.json', 'neoshared/scripts/setup-wasm.sh', 'neoshared/scripts/build-wx-wasm.sh', 'neoshared/scripts/build-wasm-app.sh') }}
+          key: neotpc-wasm-${{ runner.os }}-${{ env.NEO_WASM_EMSCRIPTEN_VERSION }}-${{ env.NEO_WASM_WX_COMMIT }}-${{ steps.vcpkg-baseline.outputs.sha }}-${{ hashFiles('tool/vcpkg.json', 'neoshared/scripts/setup-wasm.sh', 'neoshared/scripts/build-wx-wasm.sh', 'neoshared/scripts/patch-wx-wasm-no-pthreads.py', 'neoshared/scripts/build-wasm-app.sh') }}
 
       - name: Bootstrap vcpkg
         run: bash ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
