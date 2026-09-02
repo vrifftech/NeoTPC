@@ -1661,16 +1661,17 @@ std::string normalizeTxiFooter(std::string txi) {
     return out;
 }
 
-std::uint32_t mipCountForLayer(const TextureLayer& layer, bool generate) {
-    if (!generate) return 1;
-    if (!layer.mipmaps.empty()) return static_cast<std::uint32_t>(1 + layer.mipmaps.size());
-    std::uint32_t count = 1;
-    std::uint32_t w = layer.width;
-    std::uint32_t h = layer.height;
-    while (w > 1 || h > 1) {
-        w = std::max<std::uint32_t>(1, w / 2);
-        h = std::max<std::uint32_t>(1, h / 2);
+// Odyssey animated TPCs do not use the ordinary "until both axes are 1"
+// mip chain for rectangular frames. The game-compatible chain ends when
+// either axis can no longer be halved. For example, a 256x64 frame stores
+// 256x64 through 4x1, but not 2x1 or 1x1.
+std::uint32_t animatedTpcMipCount(std::uint32_t width, std::uint32_t height) {
+    if (width == 0 || height == 0) return 0;
+    std::uint32_t count = 0;
+    while (width > 0 && height > 0) {
         ++count;
+        width /= 2;
+        height /= 2;
     }
     return count;
 }
@@ -1934,6 +1935,53 @@ std::size_t tpcMipPayloadSize(const TpcContainerLayout& layout,
         return static_cast<std::size_t>(width) * height * 3u;
     }
     return static_cast<std::size_t>(width) * height * 4u;
+}
+
+std::uint8_t inferAnimatedTpcMipCount(const TpcContainerLayout& layout,
+                                      std::uint32_t layerWidth,
+                                      std::uint32_t layerHeight,
+                                      std::uint32_t layerCount) {
+    const auto canonical = animatedTpcMipCount(layerWidth, layerHeight);
+    if (canonical == 0) return 1;
+    if (layout.dataSize == 0 || layerCount == 0) {
+        return static_cast<std::uint8_t>(std::min<std::uint32_t>(255u, canonical));
+    }
+
+    // The animated header stores the complete payload size and uses a sentinel
+    // mip count of 1. Infer the physical chain length from that payload so files
+    // previously written by NeoTPC with an ordinary full rectangular chain can
+    // still be opened, while new files use the Odyssey-compatible chain.
+    std::uint32_t fullCount = 1;
+    for (std::uint32_t w = layerWidth, h = layerHeight; w > 1 || h > 1; ) {
+        w = std::max<std::uint32_t>(1, w / 2);
+        h = std::max<std::uint32_t>(1, h / 2);
+        ++fullCount;
+    }
+
+    std::uint64_t oneLayerBytes = 0;
+    std::uint32_t w = layerWidth;
+    std::uint32_t h = layerHeight;
+    for (std::uint32_t count = 1; count <= fullCount; ++count) {
+        std::uint64_t next = 0;
+        if (!parser::checkedAdd(oneLayerBytes, tpcMipPayloadSize(layout, w, h), next)) {
+            throw TextureError("TPC animated mipmap payload size overflows");
+        }
+        oneLayerBytes = next;
+
+        std::uint64_t totalBytes = 0;
+        if (!parser::checkedMultiply(oneLayerBytes, layerCount, totalBytes)) {
+            throw TextureError("TPC animated mipmap payload size overflows");
+        }
+        if (totalBytes == layout.dataSize) {
+            return static_cast<std::uint8_t>(std::min<std::uint32_t>(255u, count));
+        }
+        if (totalBytes > layout.dataSize) break;
+
+        w = std::max<std::uint32_t>(1, w / 2);
+        h = std::max<std::uint32_t>(1, h / 2);
+    }
+
+    return static_cast<std::uint8_t>(std::min<std::uint32_t>(255u, canonical));
 }
 
 TpcContainerLayout inspectTpcContainer(const std::vector<std::uint8_t>& bytes) {
@@ -2576,11 +2624,7 @@ TextureData readTpcTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
             throw TextureError("TPC animation grid does not fit within the header dimensions");
         }
         if (headerDataSize > 0) {
-            TextureLayer frameDimensions;
-            frameDimensions.width = layerWidth;
-            frameDimensions.height = layerHeight;
-            mipMapCount = static_cast<std::uint8_t>(
-                std::min<std::uint32_t>(255u, mipCountForLayer(frameDimensions, true)));
+            mipMapCount = inferAnimatedTpcMipCount(layout, layerWidth, layerHeight, layerCount);
         }
     }
 
@@ -2807,20 +2851,27 @@ static void writeTpcTexture(const TextureData& input, const std::filesystem::pat
         if (layers.size() != frameCount) {
             throw TextureError("TPC animation layer count does not match the TXI grid");
         }
+        const auto requiredMipCount = animatedTpcMipCount(first.width, first.height);
+        if (requiredMipCount == 0) throw TextureError("TPC animation frames have invalid dimensions");
         for (auto& layer : layers) {
-            TextureLayer frameDimensions;
-            frameDimensions.width = layer.width;
-            frameDimensions.height = layer.height;
-            const auto requiredMipCount = mipCountForLayer(frameDimensions, true);
             if (layer.mipmaps.size() + 1 != requiredMipCount) layer.mipmaps.clear();
         }
     }
 
     // Animated TPC stores a sentinel mip count in the header; readers derive a
-    // complete chain from each frame's dimensions, so animation output must
-    // always carry that full chain even when ordinary mip generation is off.
+    // game-specific chain from each frame's dimensions, so animation output
+    // must carry that chain even when ordinary mip generation is off.
     const bool generate = (options.generateMipmaps || animated) && compression != TextureCompression::Gray;
     auto mipChains = makeMipChainPerLayer(layers, generate, options.bicubicMipmaps, true);
+    if (animated) {
+        const auto requiredMipCount = static_cast<std::size_t>(animatedTpcMipCount(first.width, first.height));
+        for (auto& chain : mipChains) {
+            if (chain.size() < requiredMipCount) {
+                throw TextureError("TPC animation mipmap chain is incomplete");
+            }
+            chain.resize(requiredMipCount);
+        }
+    }
     const std::uint8_t mipMapCount = static_cast<std::uint8_t>(std::min<std::size_t>(255, mipChains.front().size()));
 
     auto encodeMip = [&](const TextureLayer& layer) -> std::vector<std::uint8_t> {
@@ -3419,7 +3470,7 @@ TextureData loadTextureBytes(const std::vector<std::uint8_t>& bytes,
 std::string imageCodecSupportReport() {
     std::ostringstream out;
     out << "Texture image codec support:\n";
-    out << "  TPC: built-in read/write for raw, grayscale, Xbox-swizzled BGRA, DXT1/BC1, and DXT5/BC3 textures; mipmaps and cubemap faces are preserved\n";
+    out << "  TPC: built-in read/write for raw, grayscale, Xbox-swizzled BGRA, DXT1/BC1, and DXT5/BC3 textures; mipmaps, cubemap faces, and rectangular animation frames are preserved\n";
     out << "  TXB: built-in read-only conversion support for Xbox swizzled BGRA/grayscale and DXT1/DXT5 textures\n";
     out << "  DDS: built-in read/write for pitched BGRA/BGR, A1R5G5B5, R5G6B5, ARGB4444, DXT1/DXT3/DXT5, mipmaps, and full or partial cubemaps\n";
     out << "  TGA: built-in read/write\n";
