@@ -20,6 +20,12 @@ enum class TextureFileKind {
     Txi,
 };
 
+// Auto preserves an imported DDS dialect; new DDS exports use the game header.
+enum class DdsDialect { Auto, Game, Standard };
+enum class MipmapPolicy { Preserve, Rebuild, BaseOnly };
+enum class MipmapAlpha { Independent, Transparency };
+enum class MipmapColor { Stored, Srgb };
+
 enum class TextureCompression {
     Auto,
     None,
@@ -72,6 +78,8 @@ struct TextureLayer {
 
 struct TxiFeatures {
     bool cube = false;
+    bool mipmapSpecified = false;
+    bool mipmap = true;
     bool isBumpMap = false;
     bool compressTextureSpecified = false;
     bool compressTexture = true;
@@ -87,9 +95,15 @@ struct TextureSaveOptions {
     TextureCompression compression = TextureCompression::Auto;
     bool generateMipmaps = true;
     bool bicubicMipmaps = false;
+    MipmapPolicy mipmapPolicy = MipmapPolicy::Preserve;
+    // Explicit authoring choices: data/mask channels are independent by default.
+    MipmapAlpha mipmapAlpha = MipmapAlpha::Independent;
+    MipmapColor mipmapColor = MipmapColor::Stored;
     bool flipXOnSave = false;
     bool flipYOnSave = false;
-    float alphaBlending = 1.0f;
+    // Unspecified preserves the input header float (not pixel opacity).
+    std::optional<float> alphaBlending;
+    DdsDialect ddsDialect = DdsDialect::Auto;
 
     // DXT/BC1/BC3 encoder controls. Fast is range fitting, Normal adds
     // cluster endpoint fitting, High adds local endpoint search.
@@ -115,6 +129,9 @@ struct TextureData {
     float alphaBlending = 1.0f;
     TextureCompression preferredCompression = TextureCompression::Auto;
     std::string sourceEncoding;
+    DdsDialect ddsDialect = DdsDialect::Auto;
+    // Readable does not imply game-compatible. Shown in info/GUI metadata.
+    std::vector<std::string> compatibilityWarnings;
     bool compressed = false;
     bool hasAlpha = false;
     bool cubeMap = false;
@@ -125,6 +142,20 @@ struct TextureData {
     bool hasPixels() const noexcept { return !layers.empty() && !layers.front().rgba.empty(); }
 };
 
+bool storesMipmaps(const TextureSaveOptions& options) noexcept;
+// Compares only settings that can affect the requested output representation.
+bool sameEncodingOptions(const TextureSaveOptions& a, const TextureSaveOptions& b,
+                         TextureFileKind kind, const TextureData& texture);
+TextureFileKind kindForExtension(const std::filesystem::path& path);
+
+struct EncodedTexture {
+    std::vector<std::uint8_t> image;
+    std::optional<std::vector<std::uint8_t>> sidecar;
+};
+// Pure encode: no output file or temporary file is created. Suitable for preview
+// and for committing exactly the already-reviewed bytes.
+EncodedTexture encodeTexture(const TextureData& texture, const std::filesystem::path& output,
+                             const TextureSaveOptions& options = {});
 TextureData loadTexture(const std::filesystem::path& path);
 TextureData loadTextureBytes(const std::vector<std::uint8_t>& bytes,
                              const std::filesystem::path& virtualPath,
@@ -132,6 +163,12 @@ TextureData loadTextureBytes(const std::vector<std::uint8_t>& bytes,
 void saveTexture(const TextureData& texture,
                  const std::filesystem::path& output,
                  const TextureSaveOptions& options = {});
+
+// Transactional, exact encoded copy for an unchanged document. A present
+// sidecar (including an empty one) is preserved; absence removes stale TXI.
+void saveEncodedTexture(const std::vector<std::uint8_t>& imageBytes,
+                        const std::optional<std::vector<std::uint8_t>>& sidecarBytes,
+                        const std::filesystem::path& output);
 
 struct TgaTxiPairPaths {
     std::filesystem::path tga;
@@ -142,6 +179,11 @@ struct TgaTxiPairPaths {
 // header and encoded pixel/mipmap payload are preserved byte-for-byte.
 void replaceTpcEmbeddedTxi(const std::filesystem::path& tpcPath,
                            const std::string& txi);
+
+std::vector<std::uint8_t> patchTpcTxiBytes(const std::vector<std::uint8_t>& original, const std::string& txi);
+
+void saveTpcWithEmbeddedTxi(const std::vector<std::uint8_t>& original,
+                           const std::string& txi, const std::filesystem::path& output);
 
 // Writes a lossless TGA plus a same-stem TXI sidecar. The TXI file is created
 // even when the metadata is empty so an explicit split always produces a pair.

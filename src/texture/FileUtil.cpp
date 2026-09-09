@@ -1,4 +1,5 @@
 #include "texture/FileUtil.hpp"
+#include "texture/Operation.hpp"
 #include "texture/ParserLimits.hpp"
 
 #include <algorithm>
@@ -177,10 +178,14 @@ std::vector<std::uint8_t> readFileBytes(const std::filesystem::path& path, std::
     std::ifstream in(path, std::ios::binary);
     if (!in) throw std::runtime_error("Unable to open file: " + pathToUtf8(path));
     std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
-    if (!bytes.empty()) in.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-    if (!in && !in.eof()) throw std::runtime_error("Unable to read file: " + pathToUtf8(path));
-    if (static_cast<std::size_t>(in.gcount()) != bytes.size()) {
-        throw std::runtime_error("File changed while it was being read: " + pathToUtf8(path));
+    for (std::size_t offset = 0; offset < bytes.size();) {
+        checkOperation();
+        const auto count = std::min<std::size_t>(1024 * 1024, bytes.size() - offset);
+        in.read(reinterpret_cast<char*>(bytes.data() + offset), static_cast<std::streamsize>(count));
+        if (static_cast<std::size_t>(in.gcount()) != count) {
+            throw TextureError("File changed or could not be read: " + pathToUtf8(path));
+        }
+        offset += count;
     }
     char extra = 0;
     if (in.read(&extra, 1)) throw std::runtime_error("File grew beyond its inspected size while reading: " + pathToUtf8(path));
@@ -316,6 +321,44 @@ std::vector<std::filesystem::path> findConflictingTexturePaths(const std::filesy
         return pathToUtf8(left.filename()) < pathToUtf8(right.filename());
     });
     return matches;
+}
+
+bool usesTxiSidecar(const std::filesystem::path& path) {
+    const auto ext = extensionLower(path);
+    return ext == "tga" || ext == "dds" || ext == "png" || ext == "bmp" ||
+           ext == "jpg" || ext == "jpeg" || ext == "jpe";
+}
+
+std::optional<std::filesystem::path> findTxiSidecar(const std::filesystem::path& path) {
+    const auto parent = path.parent_path().empty() ? std::filesystem::path(".") : path.parent_path();
+    const auto wanted = asciiLower(pathToUtf8(path.stem()));
+    std::optional<std::filesystem::path> found;
+    std::error_code ec;
+    std::filesystem::directory_iterator it(parent, ec), end;
+    if (ec == std::errc::no_such_file_or_directory) return {};
+    if (ec) throw TextureError("Unable to inspect TXI sidecars: " + ec.message());
+    for (; it != end; it.increment(ec)) {
+        if (ec) throw TextureError("Unable to inspect TXI sidecars: " + ec.message());
+        checkOperation();
+        const auto candidate = it->path();
+        if (extensionLower(candidate) != "txi" || asciiLower(pathToUtf8(candidate.stem())) != wanted) continue;
+        if (!it->is_regular_file(ec) || ec) {
+            throw TextureError("TXI sidecar is not a readable regular file: " + pathToUtf8(candidate));
+        }
+        if (found) throw TextureError("Ambiguous TXI sidecars: " + pathToUtf8(*found) + " and " + pathToUtf8(candidate) +
+                                     ". Keep one sidecar for this resource before opening or replacing it.");
+        found = candidate;
+    }
+    if (ec) throw TextureError("Unable to inspect TXI sidecars: " + ec.message());
+    return found;
+}
+
+std::string canonicalPathKey(const std::filesystem::path& path) {
+    std::error_code ec;
+    const auto canonical = std::filesystem::weakly_canonical(std::filesystem::absolute(path), ec);
+    if (ec) throw TextureError("Unable to resolve file path: " + pathToUtf8(path) + ": " + ec.message());
+    // Resource destinations must be unique even if this host allows both cases.
+    return asciiLower(genericPathToUtf8(canonical));
 }
 
 } // namespace neotpc::texture

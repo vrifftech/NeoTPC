@@ -1,86 +1,41 @@
 #include "texture/BatchConverter.hpp"
-
 #include "texture/Error.hpp"
 #include "texture/FileUtil.hpp"
+#include "texture/Operation.hpp"
 
 #include <algorithm>
+#include <map>
 #include <set>
 #include <sstream>
 #include <system_error>
-
-namespace fs = std::filesystem;
+#include <utility>
 
 namespace neotpc::texture {
+namespace fs = std::filesystem;
 namespace {
-
-bool isInputPixelExtension(const std::string& extension) {
-    return extension == "tga" || extension == "tpc" || extension == "dds" ||
-           extension == "png" || extension == "jpg" || extension == "jpeg" ||
-           extension == "jpe" || extension == "bmp" || extension == "txb";
+bool pixelExtension(const std::string& ext) {
+    return ext == "tpc" || ext == "txb" || ext == "tga" || ext == "dds" ||
+           ext == "png" || ext == "jpg" || ext == "jpeg" || ext == "jpe" || ext == "bmp";
 }
-
-bool isOutputExtension(const std::string& extension) {
-    return (isInputPixelExtension(extension) && extension != "txb") || extension == "txi";
+std::string normalizedExtension(std::string ext) {
+    ext = asciiLower(std::move(ext));
+    while (!ext.empty() && ext.front() == '.') ext.erase(ext.begin());
+    return ext == "jpeg" || ext == "jpe" ? "jpg" : ext;
 }
-
-std::string pathKey(const fs::path& path) {
-    auto key = genericPathToUtf8(path.lexically_normal());
-#if defined(_WIN32)
-    key = asciiLower(std::move(key));
-#endif
-    return key;
-}
-
-static std::string normalizeTextureExtension(std::string extension) {
-    extension = asciiLower(std::move(extension));
-    while (!extension.empty() && extension.front() == '.') extension.erase(extension.begin());
-    if (extension == "jpeg" || extension == "jpe") return "jpg";
-    return extension;
-}
-
-bool hasPixelSidecarPartner(const fs::path& txiPath) {
-    static const char* extensions[] = {".tga", ".tpc", ".dds", ".png", ".jpg", ".jpeg", ".jpe", ".bmp"};
-    for (const char* extension : extensions) {
-        auto candidate = txiPath;
-        candidate.replace_extension(extension);
-        std::error_code ec;
-        if (fs::is_regular_file(candidate, ec) && !ec) return true;
+const char* statusText(BatchItemStatus status) {
+    switch (status) {
+    case BatchItemStatus::Ready: return "ready";
+    case BatchItemStatus::Conflict: return "held";
+    case BatchItemStatus::Converted: return "converted";
+    case BatchItemStatus::Skipped: return "skipped";
+    case BatchItemStatus::Failed: return "failed";
     }
-    return false;
+    return "failed";
 }
-
-fs::path collisionPath(const fs::path& initial,
-                       const fs::path& source,
-                       std::set<std::string>& claimed) {
-    if (claimed.insert(pathKey(initial)).second) return initial;
-
-    const auto sourceExtension = normalizeTextureExtension(extensionLower(source));
-    const auto outputExtension = initial.extension();
-    const auto parent = initial.parent_path();
-
-    auto collisionStem = initial.stem();
-    collisionStem += fs::path("." + sourceExtension).native();
-
-    auto candidateName = collisionStem;
-    candidateName += outputExtension.native();
-    auto candidate = parent / candidateName;
-    unsigned suffix = 2;
-    while (!claimed.insert(pathKey(candidate)).second) {
-        candidateName = collisionStem;
-        candidateName += fs::path("-" + std::to_string(suffix++)).native();
-        candidateName += outputExtension.native();
-        candidate = parent / candidateName;
-    }
-    return candidate;
+std::string oneLine(std::string text) {
+    for (auto& c : text) if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+    return text;
 }
-
-std::string oneLine(std::string value) {
-    std::replace(value.begin(), value.end(), '\n', ' ');
-    std::replace(value.begin(), value.end(), '\r', ' ');
-    std::replace(value.begin(), value.end(), '\t', ' ');
-    return value;
-}
-
 bool safeRelativePath(const fs::path& path) {
     if (path.empty() || path.is_absolute()) return false;
     for (const auto& component : path) {
@@ -126,6 +81,22 @@ void requireContainedOutput(const fs::path& outputRoot, const fs::path& output) 
                            pathToUtf8(output));
     }
 
+    // Resource names are case-insensitive even on case-sensitive hosts. Do not
+    // create a second differently-cased name beside an existing resource.
+    ec.clear();
+    fs::directory_iterator siblings(absoluteOutput.parent_path(),ec), siblingEnd;
+    if(ec && ec != std::errc::no_such_file_or_directory) throw TextureError("Unable to inspect output directory: " + ec.message());
+    while(!ec && siblings!=siblingEnd) {
+        checkOperation();
+        if(siblings->path().filename()!=absoluteOutput.filename() &&
+           asciiLower(pathToUtf8(siblings->path().filename()))==asciiLower(pathToUtf8(absoluteOutput.filename()))) {
+            std::error_code sameError;
+            if(!fs::equivalent(siblings->path(),absoluteOutput,sameError) || sameError)
+                throw TextureError("Existing output differs only by case; resolve it before converting: " + pathToUtf8(siblings->path()));
+        }
+        siblings.increment(ec);
+    }
+    if(ec && ec != std::errc::no_such_file_or_directory) throw TextureError("Unable to inspect output directory: " + ec.message());
     ec.clear();
     const fs::file_status status = fs::symlink_status(absoluteOutput, ec);
     if (ec && ec != std::errc::no_such_file_or_directory) {
@@ -136,125 +107,189 @@ void requireContainedOutput(const fs::path& outputRoot, const fs::path& output) 
     }
 }
 
+std::vector<fs::path> outputMembers(const fs::path& image) {
+    std::vector<fs::path> out{image};
+    if (usesTxiSidecar(image)) {
+        auto sidecar = findTxiSidecar(image);
+        if (sidecar) out.push_back(*sidecar);
+        else { auto target = image; target.replace_extension(".txi"); out.push_back(target); }
+    }
+    return out;
+}
+void hold(BatchItemResult& row, const std::string& reason) {
+    row.status = BatchItemStatus::Conflict;
+    if (!row.message.empty()) row.message += " | ";
+    row.message += reason;
+}
+std::string rowsText(const std::vector<BatchItemResult>& items) {
+    std::ostringstream out;
+    out << "status\tinput\toutput\tmessage\n";
+    for (const auto& row : items)
+        out << statusText(row.status) << '\t' << genericPathToUtf8(row.input) << '\t'
+            << genericPathToUtf8(row.output) << '\t' << oneLine(row.message) << '\n';
+    return out.str();
+}
 } // namespace
 
 bool isSupportedTexturePath(const fs::path& path) {
-    const auto extension = extensionLower(path);
-    return isInputPixelExtension(extension) || extension == "txi";
+    return pixelExtension(extensionLower(path)) || extensionLower(path) == "txi";
 }
-
+std::size_t BatchPlan::ready() const noexcept {
+    return static_cast<std::size_t>(std::count_if(items.begin(), items.end(), [](const auto& row) { return row.status == BatchItemStatus::Ready; }));
+}
+std::size_t BatchPlan::conflicts() const noexcept {
+    return static_cast<std::size_t>(std::count_if(items.begin(), items.end(), [](const auto& row) { return row.status == BatchItemStatus::Conflict; }));
+}
+std::string BatchPlan::summary() const {
+    std::ostringstream out;
+    out << "Preflight: " << ready() << " ready, " << conflicts() << " held, "
+        << items.size() - ready() - conflicts() << " skipped. No output has been written.\n\n" << rowsText(items);
+    return out.str();
+}
 std::string BatchReport::summary() const {
     std::ostringstream out;
-    out << "Texture batch conversion\n"
-        << "discovered: " << discovered << '\n'
-        << "converted: " << converted << '\n'
-        << "skipped: " << skipped << '\n'
-        << "failed: " << failed << '\n'
-        << "cancelled: " << (cancelled ? "yes" : "no") << '\n';
-    if (!items.empty()) {
-        out << "\nstatus\tinput\toutput\tmessage\n";
-        for (const auto& item : items) {
-            const char* status = item.status == BatchItemStatus::Converted ? "converted" :
-                                 item.status == BatchItemStatus::Skipped ? "skipped" : "failed";
-            out << status << '\t' << genericPathToUtf8(item.input) << '\t'
-                << genericPathToUtf8(item.output) << '\t' << oneLine(item.message) << '\n';
-        }
-    }
+    out << "Texture batch conversion\ndiscovered: " << discovered << "\nconverted: " << converted
+        << "\nskipped: " << skipped << "\nheld: " << conflicts << "\nfailed: " << failed
+        << "\ncancelled: " << (cancelled ? "yes" : "no") << "\n\n" << rowsText(items);
     return out.str();
 }
 
-BatchReport batchConvertTextures(const fs::path& inputDirectory,
-                                 const fs::path& outputDirectory,
-                                 const BatchOptions& options,
-                                 const BatchProgress& progress) {
-    if (!fs::is_directory(inputDirectory)) {
-        throw TextureError("Batch input is not a directory: " + pathToUtf8(inputDirectory));
-    }
+BatchPlan planTextureBatch(const fs::path& inputDirectory, const fs::path& outputDirectory, const BatchOptions& options) {
+    if (!fs::is_directory(inputDirectory)) throw TextureError("Batch input is not a directory: " + pathToUtf8(inputDirectory));
     if (outputDirectory.empty()) throw TextureError("Batch output directory is empty");
-
-    const auto outputExtension = normalizeTextureExtension(options.outputExtension);
-    if (!isOutputExtension(outputExtension)) {
-        throw TextureError("Unsupported batch output extension: " + outputExtension);
-    }
-
-    std::vector<fs::path> inputs;
-    const auto consider = [&](const fs::directory_entry& entry) {
+    const auto ext = normalizedExtension(options.outputExtension);
+    if ((!pixelExtension(ext) || ext == "txb") && ext != "txi") throw TextureError("Unsupported batch output extension: " + ext);
+    BatchPlan plan{inputDirectory, outputDirectory, options, {}};
+    plan.options.outputExtension = ext;
+    const auto inRoot = fs::weakly_canonical(fs::absolute(inputDirectory));
+    const auto outRoot = fs::weakly_canonical(fs::absolute(outputDirectory));
+    const bool excludeOutput = canonicalPathKey(inRoot) != canonicalPathKey(outRoot) && pathIsWithin(inRoot, outRoot);
+    std::vector<fs::path> files;
+    auto consider = [&](const fs::directory_entry& entry) {
+        checkOperation();
         std::error_code ec;
-        const fs::file_status status = entry.symlink_status(ec);
-        if (ec || !fs::is_regular_file(status) || !isSupportedTexturePath(entry.path())) return;
-        if (extensionLower(entry.path()) == "txi" && hasPixelSidecarPartner(entry.path())) return;
-        inputs.push_back(entry.path());
+        if (fs::is_regular_file(entry.symlink_status(ec)) && !ec && isSupportedTexturePath(entry.path())) files.push_back(entry.path());
     };
-
-    std::error_code iterationError;
+    std::error_code ec;
     if (options.recursive) {
-        fs::recursive_directory_iterator it(inputDirectory, fs::directory_options::skip_permission_denied, iterationError);
-        fs::recursive_directory_iterator end;
-        while (!iterationError && it != end) {
-            consider(*it);
-            it.increment(iterationError);
+        fs::recursive_directory_iterator it(inputDirectory, fs::directory_options::skip_permission_denied, ec), end;
+        while (!ec && it != end) {
+            checkOperation();
+            if (excludeOutput && fs::weakly_canonical(it->path()) == outRoot) it.disable_recursion_pending();
+            else consider(*it);
+            it.increment(ec);
         }
     } else {
-        fs::directory_iterator it(inputDirectory, fs::directory_options::skip_permission_denied, iterationError);
-        fs::directory_iterator end;
-        while (!iterationError && it != end) {
-            consider(*it);
-            it.increment(iterationError);
-        }
+        fs::directory_iterator it(inputDirectory, fs::directory_options::skip_permission_denied, ec), end;
+        while (!ec && it != end) { consider(*it); it.increment(ec); }
     }
-    if (iterationError) {
-        throw TextureError("Unable to scan batch input: " + iterationError.message());
-    }
-
-    std::sort(inputs.begin(), inputs.end(), [](const fs::path& left, const fs::path& right) {
-        return pathKey(left) < pathKey(right);
-    });
-
-    BatchReport report;
-    report.discovered = inputs.size();
-    std::set<std::string> claimedOutputs;
-    for (std::size_t index = 0; index < inputs.size(); ++index) {
-        const auto& input = inputs[index];
-        if (progress && !progress(index + 1, inputs.size(), input)) {
-            report.cancelled = true;
-            break;
-        }
-
-        const auto relative = lexicalRelativePath(input, inputDirectory);
-        auto output = outputDirectory / relative;
-        output.replace_extension("." + outputExtension);
-        output = collisionPath(output, input, claimedOutputs);
-
-        BatchItemResult result;
-        result.input = input;
-        result.output = output;
+    if (ec) throw TextureError("Unable to scan input folder: " + ec.message());
+    std::sort(files.begin(), files.end(), [](const auto& a, const auto& b) { return genericPathToUtf8(a) < genericPathToUtf8(b); });
+    std::set<std::string> pixelStems;
+    for (const auto& file : files) if (pixelExtension(extensionLower(file))) pixelStems.insert(canonicalPathKey(file.parent_path() / file.stem()));
+    std::vector<std::vector<fs::path>> dependencies;
+    std::vector<std::vector<fs::path>> destinations;
+    for (const auto& input : files) {
+        if (extensionLower(input) == "txi" && pixelStems.count(canonicalPathKey(input.parent_path() / input.stem()))) continue;
+        BatchItemResult row;
+        row.input = input;
+        row.output = outputDirectory / lexicalRelativePath(input, inputDirectory);
+        row.output.replace_extension("." + ext);
+        row.status = BatchItemStatus::Ready;
+        std::vector<fs::path> reads{input}, writes{row.output};
         try {
-            std::error_code existsError;
-            const bool exists = fs::exists(output, existsError);
-            if (existsError) throw TextureError("Unable to inspect output: " + existsError.message());
-            if (exists && !options.overwrite) {
-                result.status = BatchItemStatus::Skipped;
-                result.message = "Output exists (use overwrite to replace it)";
-                ++report.skipped;
-            } else {
-                requireContainedOutput(outputDirectory, output);
-                auto texture = loadTexture(input);
-                if (outputExtension != "txi" && !texture.hasPixels()) {
-                    throw TextureError("TXI-only input has no pixels to encode");
+            if (usesTxiSidecar(input)) if (auto sidecar = findTxiSidecar(input)) reads.push_back(*sidecar);
+            writes = outputMembers(row.output);
+            for (const auto& path : writes) {
+                requireContainedOutput(outputDirectory, path);
+                if (fs::exists(path) && !fs::is_regular_file(path)) throw TextureError("Output is not a regular file: " + pathToUtf8(path));
+                if (fs::exists(path) && !options.overwrite) {
+                    row.status = BatchItemStatus::Skipped;
+                    row.message = "An output image or TXI already exists; overwrite is off";
                 }
-                saveTexture(texture, output, options.saveOptions);
-                result.status = BatchItemStatus::Converted;
-                result.message = "OK";
+            }
+        } catch (const OperationCancelled&) { throw; }
+        catch (const std::exception& e) { hold(row, e.what()); }
+        plan.items.push_back(std::move(row));
+        dependencies.push_back(std::move(reads));
+        destinations.push_back(std::move(writes));
+    }
+    // Claim every output member, including a sidecar that might be deleted by a
+    // metadata-free output. Never suffix resource names or select a winner.
+    std::map<std::string, std::set<std::size_t>> writers, readers;
+    for (std::size_t i = 0; i < plan.items.size(); ++i) {
+        for (const auto& path : dependencies[i]) readers[canonicalPathKey(path)].insert(i);
+        for (const auto& path : destinations[i]) writers[canonicalPathKey(path)].insert(i);
+    }
+    for (const auto& claim : writers) {
+        if (claim.second.size() > 1) {
+            for (auto i : claim.second) hold(plan.items[i], "More than one input claims this output resource; no input was renamed or preferred");
+        }
+        const auto found = readers.find(claim.first);
+        if (found != readers.end()) {
+            for (auto writer : claim.second) for (auto reader : found->second) if (writer != reader) {
+                hold(plan.items[writer], "Would overwrite input needed by " + pathToUtf8(plan.items[reader].input));
+                hold(plan.items[reader], "Input overlaps another planned output");
+            }
+        }
+    }
+    // Existing hard-link aliases need an identity check beyond normalized paths.
+    for (std::size_t i = 0; i < plan.items.size(); ++i) for (const auto& output : destinations[i]) {
+        ec.clear();
+        if (!fs::exists(output, ec) || ec || fs::hard_link_count(output, ec) < 2 || ec) continue;
+        for (std::size_t j = 0; j < plan.items.size(); ++j) if (i != j) for (const auto& input : dependencies[j]) {
+            ec.clear();
+            if (fs::equivalent(output, input, ec) && !ec) {
+                hold(plan.items[i], "Output is a hard-link alias of another input");
+                hold(plan.items[j], "Input has a hard-link alias in the output plan");
+            }
+        }
+    }
+    return plan;
+}
+
+BatchReport executeTextureBatch(const BatchPlan& plan, const BatchProgress& progress) {
+    if (plan.conflicts() && !plan.options.skipConflicts)
+        throw TextureError("Batch preflight found conflicts. Nothing was written. Review the plan and explicitly choose to process only independent ready items.\n" + plan.summary());
+    // Recheck the full plan immediately before any write: new files/aliases can
+    // change both ownership and sidecar names while the confirmation is open.
+    auto verified = planTextureBatch(plan.inputDirectory, plan.outputDirectory, plan.options);
+    if (verified.items.size() != plan.items.size()) throw TextureError("The input folder changed after preflight. Scan it again; nothing was written.");
+    for (std::size_t i = 0; i < plan.items.size(); ++i) {
+        const auto& a = plan.items[i]; const auto& b = verified.items[i];
+        if (a.input != b.input || a.output != b.output || a.status != b.status)
+            throw TextureError("The batch plan changed after preflight. Scan it again; nothing was written.");
+    }
+    BatchReport report;
+    report.discovered = plan.items.size();
+    for (std::size_t index = 0; index < plan.items.size(); ++index) {
+        auto row = plan.items[index];
+        try {
+            checkOperation();
+            if (progress && !progress(index, plan.items.size(), row.input)) { report.cancelled = true; break; }
+            if (row.status == BatchItemStatus::Conflict) ++report.conflicts;
+            else if (row.status == BatchItemStatus::Skipped) ++report.skipped;
+            else {
+                for (const auto& member : outputMembers(row.output)) {
+                    requireContainedOutput(plan.outputDirectory, member);
+                    if (fs::exists(member) && !plan.options.overwrite) throw TextureError("Output appeared after preflight; it was not overwritten: " + pathToUtf8(member));
+                }
+                const auto texture = loadTexture(row.input);
+                if (extensionLower(row.output) != "txi" && !texture.hasPixels()) throw TextureError("TXI-only input has no pixels to encode");
+                saveTexture(texture, row.output, plan.options.saveOptions);
+                row.status = BatchItemStatus::Converted;
+                row.message = "Created";
                 ++report.converted;
             }
-        } catch (const std::exception& error) {
-            result.status = BatchItemStatus::Failed;
-            result.message = error.what();
-            ++report.failed;
-        }
-        report.items.push_back(std::move(result));
+        } catch (const OperationCancelled&) { report.cancelled = true; break; }
+        catch (const std::exception& e) { row.status = BatchItemStatus::Failed; row.message = e.what(); ++report.failed; }
+        report.items.push_back(std::move(row));
     }
+    if (!report.cancelled && progress) progress(plan.items.size(), plan.items.size(), {});
     return report;
 }
 
+BatchReport batchConvertTextures(const fs::path& input, const fs::path& output, const BatchOptions& options, const BatchProgress& progress) {
+    return executeTextureBatch(planTextureBatch(input, output, options), progress);
+}
 } // namespace neotpc::texture

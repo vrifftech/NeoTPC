@@ -2,6 +2,7 @@
 
 #include "BrowserWorkload.hpp"
 #include "EncodingOptionsPanel.hpp"
+#include "TextureTask.hpp"
 #include "PathUtils.hpp"
 #include "texture/BatchConverter.hpp"
 #include "texture/Error.hpp"
@@ -20,6 +21,7 @@
 #include <wx/panel.h>
 #include <wx/progdlg.h>
 #include <wx/sizer.h>
+#include <wx/scrolwin.h>
 #include <wx/stattext.h>
 #include <wx/textctrl.h>
 #include <wx/weakref.h>
@@ -39,6 +41,7 @@
 #if defined(__EMSCRIPTEN__)
 #include "NeoBrowserFiles.hpp"
 #include <neoshared/wasm_dialog_compat.h>
+#include <emscripten/emscripten.h>
 #endif
 
 namespace fs = std::filesystem;
@@ -60,7 +63,6 @@ constexpr std::size_t kBrowserBatchMaxTextureBytes = 64u * 1024u * 1024u;
 constexpr std::size_t kBrowserBatchMaxTxiBytes = 1u * 1024u * 1024u;
 constexpr std::uint64_t kBrowserBatchMaxAggregateBytes = UINT64_C(1024) * 1024 * 1024;
 constexpr std::uint64_t kBrowserBatchMaxDecodedBytes = UINT64_C(64) * 1024 * 1024;
-constexpr std::uintmax_t kBrowserBatchMaxOutputBytes = UINT64_C(96) * 1024 * 1024;
 
 const char* browserBatchAccept() {
     return ".tpc,.txb,.tga,.dds,.png,.jpg,.jpeg,.jpe,.bmp,.txi";
@@ -144,31 +146,6 @@ std::string formatByteCount(std::uint64_t bytes) {
     return out.str();
 }
 
-fs::path collisionPath(const fs::path& initial,
-                       const fs::path& source,
-                       std::set<std::string>& claimed) {
-    if (claimed.insert(browserPathKey(initial)).second) return initial;
-
-    const std::string sourceExtension = normalizeOutputExtension(
-        neotpc::texture::extensionLower(source));
-    const fs::path parent = initial.parent_path();
-    const fs::path outputExtension = initial.extension();
-    fs::path collisionStem = initial.stem();
-    collisionStem += fs::path("." + sourceExtension).native();
-
-    fs::path candidateName = collisionStem;
-    candidateName += outputExtension.native();
-    fs::path candidate = parent / candidateName;
-    unsigned suffix = 2;
-    while (!claimed.insert(browserPathKey(candidate)).second) {
-        candidateName = collisionStem;
-        candidateName += fs::path("-" + std::to_string(suffix++)).native();
-        candidateName += outputExtension.native();
-        candidate = parent / candidateName;
-    }
-    return candidate;
-}
-
 struct BrowserBatchItem {
     BrowserRetainedInputFile source;
     std::optional<BrowserRetainedInputFile> sidecar;
@@ -195,14 +172,17 @@ struct BrowserBatchState {
     std::vector<fs::path> outputs;
     std::size_t publishIndex = 0;
     bool publishInProgress = false;
+    bool encodingInProgress = false;
 };
 #endif
 
 BatchDialog::BatchDialog(wxWindow* parent, const wxString& initialDirectory, bool darkMode)
     : wxDialog(parent, wxID_ANY, "Batch Convert Textures", wxDefaultPosition, wxDefaultSize,
                wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER) {
+    auto* outer = new wxBoxSizer(wxVERTICAL);
+    auto* form = new wxScrolledWindow(this,wxID_ANY,wxDefaultPosition,wxDefaultSize,wxVSCROLL);
     auto* root = new wxBoxSizer(wxVERTICAL);
-    auto* intro = new wxStaticText(this, wxID_ANY,
+    auto* intro = new wxStaticText(form, wxID_ANY,
         "Convert a folder tree while preserving relative paths. Matching TXI sidecars are read automatically; "
         "TPC output embeds TXI and other image outputs write sidecars.");
     intro->Wrap(FromDIP(700));
@@ -210,9 +190,9 @@ BatchDialog::BatchDialog(wxWindow* parent, const wxString& initialDirectory, boo
 
     auto* paths = new wxFlexGridSizer(2, FromDIP(7), FromDIP(10));
     paths->AddGrowableCol(1, 1);
-    paths->Add(new wxStaticText(this, wxID_ANY, "Input folder"), 0, wxALIGN_CENTER_VERTICAL);
+    paths->Add(new wxStaticText(form, wxID_ANY, "Input folder"), 0, wxALIGN_CENTER_VERTICAL);
 #if defined(__EMSCRIPTEN__)
-    auto* inputRow = new wxPanel(this, wxID_ANY);
+    auto* inputRow = new wxPanel(form, wxID_ANY);
     auto* inputSizer = new wxBoxSizer(wxHORIZONTAL);
     inputDirectory_ = new wxTextCtrl(inputRow, wxID_ANY, "No browser folder selected",
                                      wxDefaultPosition, wxDefaultSize, wxTE_READONLY);
@@ -222,12 +202,12 @@ BatchDialog::BatchDialog(wxWindow* parent, const wxString& initialDirectory, boo
     inputRow->SetSizer(inputSizer);
     paths->Add(inputRow, 1, wxEXPAND);
 #else
-    inputDirectory_ = new wxDirPickerCtrl(this, wxID_ANY, initialDirectory, "Choose input folder",
+    inputDirectory_ = new wxDirPickerCtrl(form, wxID_ANY, initialDirectory, "Choose input folder",
                                           wxDefaultPosition, wxDefaultSize,
                                           wxDIRP_USE_TEXTCTRL | wxDIRP_DIR_MUST_EXIST);
     paths->Add(inputDirectory_, 1, wxEXPAND);
 #endif
-    paths->Add(new wxStaticText(this, wxID_ANY, "Output folder"), 0, wxALIGN_CENTER_VERTICAL);
+    paths->Add(new wxStaticText(form, wxID_ANY, "Output folder"), 0, wxALIGN_CENTER_VERTICAL);
     wxString output;
 #if !defined(__EMSCRIPTEN__)
     output = initialDirectory;
@@ -236,26 +216,36 @@ BatchDialog::BatchDialog(wxWindow* parent, const wxString& initialDirectory, boo
         output += "converted";
     }
 #endif
-    outputDirectory_ = new wxDirPickerCtrl(this, wxID_ANY, output, "Choose output folder",
+    outputDirectory_ = new wxDirPickerCtrl(form, wxID_ANY, output, "Choose output folder",
                                            wxDefaultPosition, wxDefaultSize, wxDIRP_USE_TEXTCTRL);
     paths->Add(outputDirectory_, 1, wxEXPAND);
-    paths->Add(new wxStaticText(this, wxID_ANY, "Output format"), 0, wxALIGN_CENTER_VERTICAL);
-    format_ = new wxChoice(this, wxID_ANY);
+    paths->Add(new wxStaticText(form, wxID_ANY, "Output format"), 0, wxALIGN_CENTER_VERTICAL);
+    format_ = new wxChoice(form, wxID_ANY);
     for (const char* value : {"tpc", "tga", "dds", "png", "jpg", "bmp", "txi"}) format_->Append(value);
     format_->SetSelection(0);
     paths->Add(format_, 1, wxEXPAND);
     root->Add(paths, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(10));
 
     auto* flags = new wxBoxSizer(wxHORIZONTAL);
-    recursive_ = new wxCheckBox(this, wxID_ANY, "Include subfolders");
+    recursive_ = new wxCheckBox(form, wxID_ANY, "Include subfolders");
     recursive_->SetValue(true);
-    overwrite_ = new wxCheckBox(this, wxID_ANY, "Overwrite existing outputs");
+    overwrite_ = new wxCheckBox(form, wxID_ANY, "Overwrite existing outputs");
     flags->Add(recursive_, 0, wxRIGHT, FromDIP(16));
     flags->Add(overwrite_);
+#if defined(__EMSCRIPTEN__)
+    overwrite_->SetValue(false);overwrite_->Disable();
+    overwrite_->SetLabel("Browser: new files in an empty output folder only");
+#endif
     root->Add(flags, 0, wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(10));
 
-    options_ = new EncodingOptionsPanel(this);
+    options_ = new EncodingOptionsPanel(form);
+    format_->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) {
+        options_->setTarget(neotpc::texture::kindForExtension(std::filesystem::path("output." + wxui::toStd(format_->GetStringSelection()))));
+    });
     root->Add(options_, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(10));
+
+    form->SetSizer(root);form->SetScrollRate(0,FromDIP(12));form->FitInside();
+    outer->Add(form,1,wxEXPAND);root=outer;
 
 #if defined(__EMSCRIPTEN__)
     browserProgress_ = new wxGauge(this, wxID_ANY, 1, wxDefaultPosition, wxDefaultSize, wxGA_HORIZONTAL);
@@ -263,10 +253,10 @@ BatchDialog::BatchDialog(wxWindow* parent, const wxString& initialDirectory, boo
     root->Add(browserProgress_, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(10));
 #endif
 
-    report_ = new wxTextCtrl(this, wxID_ANY, wxEmptyString, wxDefaultPosition, FromDIP(wxSize(700, 190)),
+    report_ = new wxTextCtrl(this, wxID_ANY, wxEmptyString, wxDefaultPosition, FromDIP(wxSize(640, 130)),
                              wxTE_MULTILINE | wxTE_READONLY | wxTE_DONTWRAP);
     report_->SetHint("The conversion report will appear here.");
-    root->Add(report_, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(10));
+    root->Add(report_, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(10));
 
     auto* buttons = new wxBoxSizer(wxHORIZONTAL);
     buttons->AddStretchSpacer();
@@ -284,14 +274,23 @@ BatchDialog::BatchDialog(wxWindow* parent, const wxString& initialDirectory, boo
 #if defined(__EMSCRIPTEN__)
     Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { requestBrowserInputDirectory(); }, ID_SELECT_BROWSER_INPUT);
     Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+        if(nativeBusy_)return;
         if (browserBatch_) {
             cancelBrowserConversion();
         } else {
             EndModal(wxID_CLOSE);
         }
     }, wxID_CLOSE);
+    Bind(wxEVT_CLOSE_WINDOW,[this](wxCloseEvent& event){
+        if(nativeBusy_ || browserBatch_){if(browserBatch_)cancelBrowserConversion();if(event.CanVeto())event.Veto();return;}
+        event.Skip();
+    });
 #else
-    Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { EndModal(wxID_CLOSE); }, wxID_CLOSE);
+    Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { if(!nativeBusy_) EndModal(wxID_CLOSE); }, wxID_CLOSE);
+    Bind(wxEVT_CLOSE_WINDOW, [this](wxCloseEvent& event) {
+        if(nativeBusy_) { if(event.CanVeto()) event.Veto(); return; }
+        event.Skip();
+    });
 #endif
     wxui::applyTheme(this, darkMode);
 }
@@ -314,6 +313,7 @@ BatchDialog::~BatchDialog() {
 }
 
 void BatchDialog::onConvert() {
+    if(nativeBusy_)return;
 #if defined(__EMSCRIPTEN__)
     if (browserBatch_) {
         cancelBrowserConversion();
@@ -335,34 +335,37 @@ void BatchDialog::onConvert() {
     options.overwrite = overwrite_->GetValue();
     options.saveOptions = options_->options();
 
-    wxProgressDialog progress("NeoTPC batch conversion", "Scanning textures...", 100, this,
-                              wxPD_APP_MODAL | wxPD_CAN_ABORT | wxPD_ELAPSED_TIME | wxPD_ESTIMATED_TIME |
-                              wxPD_REMAINING_TIME | wxPD_AUTO_HIDE);
+    if(nativeBusy_) return;
     try {
-        const auto result = neotpc::texture::batchConvertTextures(
-            input, output, options,
-            [&progress](std::size_t current, std::size_t total, const std::filesystem::path& source) {
-                const int percent = total == 0 ? 0 : std::clamp(static_cast<int>((current * 100) / total), 0, 100);
-                return progress.Update(percent,
-                    wxString::Format("Converting %llu of %llu\n%s",
-                                     static_cast<unsigned long long>(current),
-                                     static_cast<unsigned long long>(total),
-                                     wxpath::toWx(source).c_str()));
-            });
-        report_->ChangeValue(wxui::toWx(result.summary()));
-        if (result.failed != 0) {
-            wxMessageBox(wxString::Format("Conversion finished with %llu failure(s). See the report for details.",
-                                          static_cast<unsigned long long>(result.failed)),
-                         "Batch conversion", wxOK | wxICON_WARNING, this);
-        } else if (!result.cancelled) {
-            wxMessageBox(wxString::Format("Converted %llu texture(s); skipped %llu.",
-                                          static_cast<unsigned long long>(result.converted),
-                                          static_cast<unsigned long long>(result.skipped)),
-                         "Batch conversion", wxOK | wxICON_INFORMATION, this);
+        TextureBusyGuard busy(nativeBusy_);
+        auto plan=runTextureTask(this,"Plan batch destinations",[&](TextureTaskProgress&) {
+            return neotpc::texture::planTextureBatch(input,output,options);
+        });
+        report_->ChangeValue(wxui::toWx(plan.summary()));
+        if(plan.ready()==0) {
+            wxMessageBox("No safe new conversions are ready. See the preflight report; no files were changed.",
+                         "Batch preflight",wxOK|wxICON_INFORMATION,this); return;
         }
-    } catch (const std::exception& error) {
-        wxui::showError(this, error);
-    }
+        if(plan.conflicts()!=0) {
+            if(!wxui::confirm(this,"Conflicting destinations held",
+                wxString::Format("%llu conflicting input(s) will NOT be converted. Resource names will not be changed.\n\nConvert only the %llu independent safe input(s)?",
+                    static_cast<unsigned long long>(plan.conflicts()),static_cast<unsigned long long>(plan.ready())))) return;
+            plan.options.skipConflicts=true;
+        }
+        if(options.overwrite && !wxui::confirm(this,"Replace existing outputs?",
+            "This batch can replace existing output images and their TXI sidecars. Input dependencies are protected. Continue?")) return;
+        const auto result=runTextureTask(this,"Convert textures",[&](TextureTaskProgress& state) {
+            return neotpc::texture::executeTextureBatch(plan,[&](std::size_t done,std::size_t total,const fs::path& source) {
+                state.set(done,total,std::to_string(done)+" / "+std::to_string(total)+" complete\n"+neotpc::texture::pathToUtf8(source));
+                return !state.cancelled.load();
+            });
+        });
+        report_->ChangeValue(wxui::toWx(result.summary()));
+        if(result.failed) wxMessageBox("Some inputs failed. Completed outputs were retained; see the report.","Batch conversion",wxOK|wxICON_WARNING,this);
+    } catch(const neotpc::texture::OperationCancelled&) {
+        report_->AppendText("\nCancelled. Completed files remain; the current unfinished image/TXI pair was not committed.\n");
+    } catch(const std::exception& error) { wxui::showError(this,error); }
+
 #endif
 }
 
@@ -557,12 +560,14 @@ void BatchDialog::startBrowserConversion() {
         if (!isPixelExtension(extension) && extension != "txi") continue;
         const std::size_t index = indexed.size();
         indexed.push_back(IndexedFile{file, *relative});
-        byPath.emplace(browserPathKey(*relative), index);
+        if(!byPath.emplace(browserPathKey(*relative), index).second) {
+            wxMessageBox("Multiple input paths differ only by case. Select a folder without those ambiguous image/TXI names.","Ambiguous browser inputs",wxOK|wxICON_WARNING,this);return;
+        }
         if (isPixelExtension(extension)) pixelStems.insert(browserStemKey(*relative));
     }
 
     std::vector<BrowserBatchItem> items;
-    std::set<std::string> claimedOutputs;
+
     std::unordered_set<std::uint32_t> usedIds;
     std::uint64_t workloadBytes = 0;
     for (const auto& entry : indexed) {
@@ -583,7 +588,7 @@ void BatchDialog::startBrowserConversion() {
 
         item.outputRelative = entry.relative;
         item.outputRelative.replace_extension("." + outputExtension);
-        item.outputRelative = collisionPath(item.outputRelative, item.relativePath, claimedOutputs);
+
         items.push_back(std::move(item));
         if (items.size() > kBrowserBatchMaxItems) {
             wxMessageBox(
@@ -593,6 +598,30 @@ void BatchDialog::startBrowserConversion() {
             return;
         }
     }
+
+    std::unordered_map<std::string,std::vector<std::size_t>> claims;
+    for(std::size_t i=0;i<items.size();++i){
+        claims[browserPathKey(items[i].outputRelative)].push_back(i);
+        if(outputUsesSidecar(outputExtension)){auto txi=items[i].outputRelative;txi.replace_extension(".txi");claims[browserPathKey(txi)].push_back(i);}
+    }
+    std::set<std::size_t> held;
+    for(const auto& claim:claims)if(claim.second.size()>1)held.insert(claim.second.begin(),claim.second.end());
+    std::vector<texture::BatchItemResult> conflicts;
+    if(!held.empty()) {
+        std::string details="Conflicting image/TXI destinations (names will not be changed):\n";
+        for(auto i:held){const auto& item=items[i];details+=item.relativePath.generic_string()+" -> "+item.outputRelative.generic_string()+"\n";
+            conflicts.push_back({item.relativePath,item.outputRelative,texture::BatchItemStatus::Conflict,"Destination collision; not written"});}
+        report_->ChangeValue(wxui::toWx(details));
+        if(held.size()==items.size()){wxMessageBox("All inputs conflict. No output was written. See the report.","Batch preflight",wxOK|wxICON_WARNING,this);return;}
+        if(!wxui::confirm(this,"Hold conflicting inputs","See the preflight report. Convert only the independent, nonconflicting inputs?"))return;
+        std::vector<BrowserBatchItem> safe;for(std::size_t i=0;i<items.size();++i)if(!held.count(i))safe.push_back(std::move(items[i]));items=std::move(safe);
+    }
+    // The selected host folder must genuinely be empty. Virtual MEMFS existence
+    // does not tell us whether a host output would overwrite an unread input.
+    try {
+        TextureBusyGuard busy(nativeBusy_);
+        runTextureTask(this,"Check browser output folder",[&](TextureTaskProgress&){browser::checkEmptyBatchOutput(outputRoot);});
+    } catch(const std::exception& error){wxui::showError(this,error);return;}
 
     for (const auto& item : items) {
         if (usedIds.insert(item.source.fileId).second) {
@@ -624,10 +653,11 @@ void BatchDialog::startBrowserConversion() {
     state->items = std::move(items);
     state->options.outputExtension = outputExtension;
     state->options.recursive = recursive_->GetValue();
-    state->options.overwrite = overwrite_->GetValue();
+    state->options.overwrite = false;
     state->options.saveOptions = options_->options();
     state->outputRoot = outputRoot;
-    state->report.discovered = state->items.size();
+    state->report.discovered = state->items.size()+conflicts.size();
+    state->report.conflicts=conflicts.size();state->report.items=std::move(conflicts);
     browserBatch_ = std::move(state);
 
     browserProgress_->SetRange(static_cast<int>(browserBatch_->items.size()));
@@ -719,98 +749,33 @@ void BatchDialog::handleBrowserSidecarRead(std::uint64_t generation,
 }
 
 void BatchDialog::encodeBrowserBatchItem(std::uint64_t generation) {
-    if (!browserBatch_ || browserBatch_->generation != generation) return;
-    const auto item = browserBatch_->items[browserBatch_->index];
+    if(!browserBatch_ || browserBatch_->generation!=generation)return;
+    browserBatch_->encodingInProgress=true;
+    const auto item=browserBatch_->items[browserBatch_->index];
     try {
-        neotpc::texture::parser::ScopedResourceLimits limits(
-            kBrowserBatchMaxTextureBytes, kBrowserBatchMaxDecodedBytes);
-        auto texture = neotpc::texture::loadTextureBytes(
-            browserBatch_->sourceBytes, item.relativePath,
-            std::move(browserBatch_->sidecarTxi));
-        std::vector<std::uint8_t>().swap(browserBatch_->sourceBytes);
-        browserBatch_->sidecarTxi.clear();
-
-        if (browserBatch_->options.outputExtension != "txi" && !texture.hasPixels()) {
-            throw neotpc::texture::TextureError("TXI-only input has no pixels to encode");
-        }
-
-        const fs::path output = browserBatch_->outputRoot / item.outputRelative;
-        std::error_code ec;
-        fs::create_directories(output.parent_path(), ec);
-        if (ec) throw neotpc::texture::TextureError("Unable to create browser output directory: " + ec.message());
-
-        neotpc::texture::saveTexture(texture, output, browserBatch_->options.saveOptions);
-        browserBatch_->outputs.clear();
-        browserBatch_->outputs.push_back(output);
-        if (outputUsesSidecar(browserBatch_->options.outputExtension) && !texture.txi.empty()) {
-            fs::path sidecar = output;
-            sidecar.replace_extension(".txi");
-            browserBatch_->outputs.push_back(std::move(sidecar));
-        }
-
-        std::uintmax_t generatedBytes = 0;
-        for (const auto& generated : browserBatch_->outputs) {
-            browser::cancelScheduledPublish(generated);
-            const std::uintmax_t size = fs::file_size(generated, ec);
-            if (ec) throw neotpc::texture::TextureError("Unable to inspect generated browser output: " + ec.message());
-            if (size > kBrowserBatchMaxOutputBytes ||
-                generatedBytes > kBrowserBatchMaxOutputBytes - size) {
-                throw neotpc::texture::TextureError(
-                    "Generated output exceeds the 96 MiB per-item browser limit");
+        texture::parser::ScopedResourceLimits limits(kBrowserBatchMaxTextureBytes,kBrowserBatchMaxDecodedBytes);
+        auto last=std::chrono::steady_clock::now();
+        texture::OperationScope checkpoint([&]{
+            if(std::chrono::steady_clock::now()-last>std::chrono::milliseconds(45)) {
+                emscripten_sleep(1);last=std::chrono::steady_clock::now();
             }
-            generatedBytes += size;
-        }
-        browserBatch_->publishIndex = 0;
-        publishNextBrowserOutput(generation);
-    } catch (const std::exception& error) {
-        cleanupBrowserOutputs();
-        completeBrowserBatchItem(false, error.what());
-    }
-}
-
-void BatchDialog::publishNextBrowserOutput(std::uint64_t generation) {
-    if (!browserBatch_ || browserBatch_->generation != generation) return;
-    if (browserBatch_->cancelRequested) {
-        cleanupBrowserOutputs();
-        finishBrowserConversion();
-        return;
-    }
-    if (browserBatch_->publishIndex >= browserBatch_->outputs.size()) {
-        completeBrowserBatchItem(true, "OK");
-        return;
-    }
-
-    const fs::path path = browserBatch_->outputs[browserBatch_->publishIndex];
-    fs::path relative = path.lexically_relative(browserBatch_->outputRoot);
-    if (relative.empty()) relative = path.filename();
-    browserBatch_->publishInProgress = true;
-    wxWeakRef<BatchDialog> weak(this);
-    neobrowser::requestDownloadFile(
-        path, neotpc::texture::genericPathToUtf8(relative),
-        [weak, generation, path](neobrowser::DownloadResult result) mutable {
-            std::error_code ignored;
-            fs::remove(path, ignored);
-            if (!weak) return;
-            auto* dialog = weak.get();
-            if (!dialog->browserBatch_ || dialog->browserBatch_->generation != generation) return;
-            dialog->browserBatch_->publishInProgress = false;
-            if (!result.error.empty() || result.cancelled()) {
-                dialog->browserBatch_->cancelRequested = true;
-                dialog->completeBrowserBatchItem(
-                    false,
-                    result.error.empty() ? "Browser output publication was cancelled" : std::move(result.error));
-                return;
-            }
-            if (result.ready()) {
-                dialog->browserBatch_->cancelRequested = true;
-                dialog->completeBrowserBatchItem(
-                    false,
-                    "The selected output directory could not be written. A replacement download was prepared and the batch was stopped to avoid accumulating downloads.");
-                return;
-            }
-            ++dialog->browserBatch_->publishIndex;
-            dialog->publishNextBrowserOutput(generation);
+            if(!browserBatch_ || browserBatch_->cancelRequested)throw texture::OperationCancelled();
         });
+        auto image=texture::loadTextureBytes(browserBatch_->sourceBytes,item.relativePath,std::move(browserBatch_->sidecarTxi));
+        std::vector<std::uint8_t>().swap(browserBatch_->sourceBytes);browserBatch_->sidecarTxi.clear();
+        auto encoded=texture::encodeTexture(image,item.outputRelative,browserBatch_->options.saveOptions);
+        texture::checkOperation();
+        browserBatch_->encodingInProgress=false;browserBatch_->publishInProgress=true;
+        // Publication is a non-cancellable new-file pair commit. On error the
+        // bridge removes newly created members; no automatic download fallback.
+        browser::publishNewBatchOutput(browserBatch_->outputRoot,item.outputRelative,encoded);
+        browserBatch_->publishInProgress=false;
+        completeBrowserBatchItem(true,"Created image/TXI pair");
+    } catch(const texture::OperationCancelled&) {
+        if(browserBatch_){browserBatch_->encodingInProgress=false;browserBatch_->publishInProgress=false;browserBatch_->cancelRequested=true;finishBrowserConversion();}
+    } catch(const std::exception& error) {
+        if(browserBatch_){browserBatch_->encodingInProgress=false;browserBatch_->publishInProgress=false;completeBrowserBatchItem(false,error.what());}
+    }
 }
 
 void BatchDialog::completeBrowserBatchItem(bool converted, std::string message) {
@@ -847,7 +812,7 @@ void BatchDialog::completeBrowserBatchItem(bool converted, std::string message) 
 
 void BatchDialog::finishBrowserConversion() {
     if (!browserBatch_) return;
-    if (browserBatch_->publishInProgress) {
+    if (browserBatch_->publishInProgress || browserBatch_->encodingInProgress) {
         browserBatch_->cancelRequested = true;
         return;
     }
@@ -872,11 +837,7 @@ void BatchDialog::finishBrowserConversion() {
             wxString::Format("Conversion finished with %llu failure(s). See the report for details.",
                              static_cast<unsigned long long>(report.failed)),
             "Batch conversion", wxOK | wxICON_WARNING, this);
-    } else {
-        wxMessageBox(
-            wxString::Format("Converted %llu texture(s).",
-                             static_cast<unsigned long long>(report.converted)),
-            "Batch conversion", wxOK | wxICON_INFORMATION, this);
+
     }
 }
 
@@ -885,7 +846,7 @@ void BatchDialog::cancelBrowserConversion() {
     browserBatch_->cancelRequested = true;
     convertButton_->Disable();
     report_->AppendText("Cancellation requested.\n");
-    if (browserBatch_->publishInProgress) return;
+    if (browserBatch_->publishInProgress || browserBatch_->encodingInProgress) return;
     if (browserBatch_->activeReadRequest != 0) {
         browser::cancelRetainedFileRead(browserBatch_->activeReadRequest);
         browserBatch_->activeReadRequest = 0;
@@ -910,7 +871,7 @@ void BatchDialog::setBrowserControlsBusy(bool busy) {
     outputDirectory_->Enable(!busy);
     format_->Enable(!busy);
     recursive_->Enable(!busy);
-    overwrite_->Enable(!busy);
+    overwrite_->Enable(false);
     options_->Enable(!busy);
     closeButton_->Enable(true);
     convertButton_->Enable(true);

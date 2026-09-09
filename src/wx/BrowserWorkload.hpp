@@ -1,5 +1,6 @@
 #pragma once
 
+#include "texture/Image.hpp"
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -36,5 +37,12 @@ void cancelRetainedFileRead(std::uint32_t requestId) noexcept;
 // compatibility bridge to schedule an automatic publish. Batch conversion
 // explicitly publishes outputs in sequence, so it cancels that timer first.
 void cancelScheduledPublish(const std::filesystem::path& path) noexcept;
+
+// Asyncify entry points. Require the shared new-file-only batch bridge; no
+// fallback to unchecked automatic host publication on an older shared build.
+void checkEmptyBatchOutput(const std::filesystem::path& root);
+void publishNewBatchOutput(const std::filesystem::path& root,
+                          const std::filesystem::path& relativeImage,
+                          const texture::EncodedTexture& encoded);
 
 } // namespace neotpc::browser

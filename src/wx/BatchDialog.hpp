@@ -39,6 +39,7 @@ public:
 
 private:
     void onConvert();
+    bool nativeBusy_ = false;
 
 #if defined(__EMSCRIPTEN__)
     void requestBrowserInputDirectory();
@@ -55,7 +56,6 @@ private:
                                   std::vector<std::uint8_t> bytes,
                                   std::string error);
     void encodeBrowserBatchItem(std::uint64_t generation);
-    void publishNextBrowserOutput(std::uint64_t generation);
     void completeBrowserBatchItem(bool converted, std::string message);
     void finishBrowserConversion();
     void cancelBrowserConversion();

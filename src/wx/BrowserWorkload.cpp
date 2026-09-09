@@ -1,4 +1,6 @@
 #include "BrowserWorkload.hpp"
+#include "texture/Error.hpp"
+#include <cstdlib>
 
 #include <exception>
 #include <limits>
@@ -50,6 +52,26 @@ void deliver(RetainedReadCallback callback, RetainedReadResult result) {
 }
 
 #if defined(__EMSCRIPTEN__)
+
+EM_ASYNC_JS(char*, neotpc_check_empty_batch_output_js, (const char* rootPtr), {
+    try {
+      var api=Module.neoToolsBrowserFiles;
+      if (!api || !api.checkEmptyWritableBatchDirectory) throw new Error('Update NeoShared: safe browser batch publication is unavailable. No outputs were written.');
+      await api.checkEmptyWritableBatchDirectory(UTF8ToString(rootPtr)); return 0;
+    } catch(error) {return stringToNewUTF8(String(error.message || error));}
+});
+EM_ASYNC_JS(char*, neotpc_publish_batch_pair_js,
+ (const char* rootPtr, const char* relativePtr, const unsigned char* imagePtr, unsigned imageSize,
+  const unsigned char* sidecarPtr, unsigned sidecarSize, int hasSidecar), {
+    try {
+      var api=Module.neoToolsBrowserFiles;
+      if (!api || !api.publishNewWritableBatchFiles) throw new Error('Safe browser batch bridge is unavailable.');
+      var name=UTF8ToString(relativePtr);
+      var entries=[{relativePath:name,bytes:HEAPU8.slice(imagePtr,imagePtr+imageSize)}];
+      if(hasSidecar) entries.push({relativePath:name.replace(/\.[^/.]+$/,'.txi'),bytes:HEAPU8.slice(sidecarPtr,sidecarPtr+sidecarSize)});
+      await api.publishNewWritableBatchFiles(UTF8ToString(rootPtr),entries);return 0;
+    } catch(error) {return stringToNewUTF8(String(error.message || error));}
+});
 
 EM_JS(int, neotpc_begin_retained_read_js,
       (unsigned int requestId,
@@ -128,6 +150,28 @@ EM_JS(void, neotpc_cancel_scheduled_publish_js, (const char* pathPtr), {
 #endif
 
 } // namespace
+
+void checkEmptyBatchOutput(const std::filesystem::path& root) {
+#if defined(__EMSCRIPTEN__)
+    char* error=neotpc_check_empty_batch_output_js(root.generic_string().c_str());
+    if(error){std::string message(error);std::free(error);throw texture::TextureError(message);}
+#else
+    (void)root;throw texture::TextureError("Browser output is unavailable on this target");
+#endif
+}
+void publishNewBatchOutput(const std::filesystem::path& root,const std::filesystem::path& relativeImage,
+                          const texture::EncodedTexture& encoded) {
+#if defined(__EMSCRIPTEN__)
+    const auto sidecarSize=encoded.sidecar ? encoded.sidecar->size() : 0;
+    if(encoded.image.size()>96u*1024*1024 || sidecarSize>96u*1024*1024-encoded.image.size())throw texture::TextureError("Browser image/TXI pair exceeds 96 MiB");
+    char* error=neotpc_publish_batch_pair_js(root.generic_string().c_str(),relativeImage.generic_string().c_str(),
+        encoded.image.data(),static_cast<unsigned>(encoded.image.size()),encoded.sidecar?encoded.sidecar->data():nullptr,
+        static_cast<unsigned>(sidecarSize),encoded.sidecar?1:0);
+    if(error){std::string message(error);std::free(error);throw texture::TextureError(message);}
+#else
+    (void)root;(void)relativeImage;(void)encoded;throw texture::TextureError("Browser output is unavailable on this target");
+#endif
+}
 
 std::uint32_t requestRetainedFileBytes(std::uint32_t sessionId,
                                        std::uint32_t fileId,

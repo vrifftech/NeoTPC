@@ -13,7 +13,7 @@ MINIMAL_RELEASE="ON"
 JOBS="${JOBS:-}"
 TARGET=""
 GENERATOR=""
-NEOSHARED_ROOT_VALUE="${NEOSHARED_ROOT:-}"
+NEOSHARED_ROOT_VALUE=""
 VCPKG_ROOT_VALUE="${VCPKG_ROOT:-${VCPKG_INSTALLATION_ROOT:-}}"
 VCPKG_TRIPLET="${VCPKG_DEFAULT_TRIPLET:-}"
 NO_VCPKG=0
@@ -65,10 +65,14 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ -z "$NEOSHARED_ROOT_VALUE" ]]; then
+  NEOSHARED_ROOT_VALUE="$("${CMAKE:-cmake}" -P "$ROOT_DIR/cmake/NeoSharedSource.cmake")"
+fi
+
 if [[ "$BUILD_DIR" != /* ]]; then
   BUILD_DIR="$ROOT_DIR/$BUILD_DIR"
 fi
-if [[ -n "$NEOSHARED_ROOT_VALUE" && "$NEOSHARED_ROOT_VALUE" != /* ]]; then
+if [[ -n "$NEOSHARED_ROOT_VALUE" && "$NEOSHARED_ROOT_VALUE" != /* && "$NEOSHARED_ROOT_VALUE" != [A-Za-z]:/* ]]; then
   NEOSHARED_ROOT_VALUE="$ROOT_DIR/$NEOSHARED_ROOT_VALUE"
 fi
 if [[ -n "$VCPKG_ROOT_VALUE" && "$VCPKG_ROOT_VALUE" != /* ]]; then

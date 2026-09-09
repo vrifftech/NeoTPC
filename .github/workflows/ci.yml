@@ -6,11 +6,6 @@ on:
   repository_dispatch:
     types: [neoshared-updated]
   workflow_dispatch:
-    inputs:
-      neoshared_ref:
-        description: neoshared branch, tag, or commit SHA (blank uses NEOSHARED_REF or main)
-        required: false
-        type: string
 
 permissions:
   contents: read
@@ -19,16 +14,13 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  NEOSHARED_REF: ${{ github.event.client_payload.neoshared_ref || inputs.neoshared_ref || vars.NEOSHARED_REF || 'main' }}
-
 jobs:
   linux:
     name: Linux (GCC + system wxWidgets)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
-      VCPKG_BINARY_SOURCES: clear;x-gha,readwrite
+      VCPKG_BINARY_SOURCES: clear;default,readwrite
       WX_CONFIG: /usr/bin/wx-config
 
     steps:
@@ -42,7 +34,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: vrifftech/neoshared
-          ref: ${{ env.NEOSHARED_REF }}
+          ref: main
           path: neoshared
           persist-credentials: false
 
@@ -85,13 +77,6 @@ jobs:
       - name: Bootstrap vcpkg
         run: bash ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
 
-      - name: Enable vcpkg GitHub Actions cache
-        uses: actions/github-script@v9
-        with:
-          script: |
-            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
-            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
-
       - name: Configure and build
         working-directory: tool
         run: |
@@ -103,14 +88,12 @@ jobs:
             --cli ON \
             --minimal-release OFF \
             --generator Ninja \
-            --neoshared-root ../neoshared \
             --vcpkg-root ../vcpkg \
             --vcpkg-triplet x64-linux \
             --jobs 2 \
             --clean \
             -- \
             -DwxWidgets_CONFIG_EXECUTABLE="$WX_CONFIG"
-
 
       - name: Stage install tree
         run: cmake --install tool/build --config Release --prefix tool/stage
@@ -129,7 +112,7 @@ jobs:
     runs-on: windows-2025-vs2026
     timeout-minutes: 150
     env:
-      VCPKG_BINARY_SOURCES: clear;x-gha,readwrite
+      VCPKG_BINARY_SOURCES: clear;default,readwrite
 
     steps:
       - name: Check out NeoTPC
@@ -142,7 +125,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: vrifftech/neoshared
-          ref: ${{ env.NEOSHARED_REF }}
+          ref: main
           path: neoshared
           persist-credentials: false
 
@@ -168,13 +151,6 @@ jobs:
           & .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Enable vcpkg GitHub Actions cache
-        uses: actions/github-script@v9
-        with:
-          script: |
-            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
-            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
-
       - name: Install wxWidgets 3.3.3
         shell: pwsh
         run: |
@@ -196,12 +172,10 @@ jobs:
             -MinimalRelease OFF `
             -Generator 'Visual Studio 18 2026' `
             -Platform x64 `
-            -NeoSharedRoot ..\neoshared `
             -VcpkgRoot ..\vcpkg `
             -VcpkgTriplet x64-windows-static `
             -Parallel 2 `
             -Clean
-
 
       - name: Stage install tree
         shell: pwsh

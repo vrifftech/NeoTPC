@@ -68,6 +68,12 @@ bool parseConvertOption(const std::vector<std::string>& args, std::size_t& index
     const auto& option = args[index];
     if (option == "--compression") {
         state.options.compression = neotpc::texture::textureCompressionFromString(nextValue(args, index, option));
+    } else if (option == "--dds-container") {
+        const auto value = nextValue(args, index, option);
+        if (value == "auto") state.options.ddsDialect = neotpc::texture::DdsDialect::Auto;
+        else if (value == "game") state.options.ddsDialect = neotpc::texture::DdsDialect::Game;
+        else if (value == "standard") state.options.ddsDialect = neotpc::texture::DdsDialect::Standard;
+        else fail("--dds-container expects auto, game or standard");
     } else if (option == "--dxt-quality") {
         state.options.dxtQuality = neotpc::texture::dxtCompressionQualityFromString(nextValue(args, index, option));
     } else if (option == "--dxt-metric") {
@@ -80,10 +86,30 @@ bool parseConvertOption(const std::vector<std::string>& args, std::size_t& index
     } else if (option == "--jpeg-quality") {
         state.options.jpegQuality = static_cast<std::uint8_t>(
             parseUnsigned(nextValue(args, index, option), 1, 100, option));
+    } else if (option == "--mip-policy") {
+        const auto value = nextValue(args, index, option);
+        using neotpc::texture::MipmapPolicy;
+        if (value == "preserve") state.options.mipmapPolicy = MipmapPolicy::Preserve;
+        else if (value == "rebuild") state.options.mipmapPolicy = MipmapPolicy::Rebuild;
+        else if (value == "base") state.options.mipmapPolicy = MipmapPolicy::BaseOnly;
+        else fail("--mip-policy expects preserve, rebuild or base");
+        state.options.generateMipmaps = value != "base";
+    } else if (option == "--mip-alpha") {
+        const auto value = nextValue(args, index, option);
+        if (value == "independent") state.options.mipmapAlpha = neotpc::texture::MipmapAlpha::Independent;
+        else if (value == "transparency") state.options.mipmapAlpha = neotpc::texture::MipmapAlpha::Transparency;
+        else fail("--mip-alpha expects independent or transparency");
+    } else if (option == "--mip-color") {
+        const auto value = nextValue(args, index, option);
+        if (value == "stored") state.options.mipmapColor = neotpc::texture::MipmapColor::Stored;
+        else if (value == "srgb") state.options.mipmapColor = neotpc::texture::MipmapColor::Srgb;
+        else fail("--mip-color expects stored or srgb");
     } else if (option == "--no-mipmaps") {
         state.options.generateMipmaps = false;
+        state.options.mipmapPolicy = neotpc::texture::MipmapPolicy::BaseOnly;
     } else if (option == "--mipmaps") {
         state.options.generateMipmaps = true;
+        state.options.mipmapPolicy = neotpc::texture::MipmapPolicy::Preserve;
     } else if (option == "--bicubic") {
         state.options.bicubicMipmaps = true;
     } else if (option == "--flip-x" || option == "--flip-x-on-save") {
@@ -140,19 +166,22 @@ void printUsage(std::ostream& out) {
         "Input formats: tpc, txb (read-only), tga, dds, png, jpg/jpeg, bmp, txi\n"
         "Output formats: tpc, tga, dds, png, jpg/jpeg, bmp, txi\n"
         "Conversion options:\n"
-        "  --compression auto|none|grey|dxt1|dxt3|dxt5|swizzled-bgra\n"
+        "  --compression auto|none|grey|dxt1|dxt3|dxt5\n"
+        "  --dds-container auto|game|standard (new DDS defaults to game)\n"
         "  --dxt-quality fast|normal|high\n"
         "  --dxt-metric perceptual|uniform\n"
         "  --weight-color-by-alpha\n"
         "  --dxt1-alpha-threshold 0..255\n"
         "  --jpeg-quality 1..100\n"
+        "  --mip-policy preserve|rebuild|base (default preserve)\n"
+        "  --mip-alpha independent|transparency --mip-color stored|srgb\n"
         "  --no-mipmaps | --mipmaps | --bicubic\n"
         "  --flip-x | --flip-y\n"
         "  --alpha-blending <number>\n"
         "  --set-alpha 0..255 | --scale-alpha <factor> | --invert-alpha\n"
         "  --txi <metadata.txi> | --set-txi <key> <value>\n"
         "Batch options:\n"
-        "  --recursive | --no-recursive | --overwrite\n";
+        "  --recursive | --no-recursive | --overwrite | --skip-conflicts\n";
 }
 
 int commandInfo(const std::vector<std::string>& args) {
@@ -220,11 +249,8 @@ int commandCombine(const std::vector<std::string>& args) {
         const auto txiBytes = neotpc::texture::readFileBytes(*state.txiFile);
         finalTxi.assign(txiBytes.begin(), txiBytes.end());
     } else {
-        auto sidecar = input;
-        sidecar.replace_extension(".txi");
-        std::error_code ec;
-        if (fs::is_regular_file(sidecar, ec)) {
-            const auto txiBytes = neotpc::texture::readFileBytes(sidecar);
+        if (const auto sidecar = neotpc::texture::findTxiSidecar(input)) {
+            const auto txiBytes = neotpc::texture::readFileBytes(*sidecar);
             finalTxi.assign(txiBytes.begin(), txiBytes.end());
         }
     }
@@ -280,6 +306,8 @@ int commandBatch(const std::vector<std::string>& args) {
             batch.recursive = true;
         } else if (option == "--no-recursive") {
             batch.recursive = false;
+        } else if (option == "--skip-conflicts") {
+            batch.skipConflicts = true;
         } else if (option == "--overwrite") {
             batch.overwrite = true;
         } else if (!parseConvertOption(args, index, state)) {

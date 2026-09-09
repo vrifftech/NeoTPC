@@ -1,4 +1,5 @@
 #include "texture/Image.hpp"
+#include "texture/Operation.hpp"
 #include "texture/InternalImageCodecs.hpp"
 #include "texture/Txi.hpp"
 
@@ -370,6 +371,9 @@ TextureLayer cropLayer(const TextureLayer& source, std::uint32_t x, std::uint32_
     return out;
 }
 
+void orderCubeFaces(std::vector<TextureLayer>& layers, const std::vector<CubeFace>& faces, bool complete);
+void denormalizeGameCubeStrip(std::vector<TextureLayer>& faces);
+
 TextureLayer composeCanvas(const TextureData& texture) {
     if (texture.layers.empty()) {
         return {};
@@ -417,6 +421,14 @@ TextureLayer composeCanvas(const TextureData& texture) {
         return canvas;
     }
 
+    if (texture.cubeMap) {
+        TextureData strip = texture;
+        orderCubeFaces(strip.layers, strip.cubeFaces, true);
+        denormalizeGameCubeStrip(strip.layers);
+        strip.cubeMap = false;
+        return composeCanvas(strip);
+    }
+
     const auto& first = texture.layers.front();
     validateLayerStorage(first, "Texture layer");
     if (texture.layers.size() > std::numeric_limits<std::uint32_t>::max()) {
@@ -440,6 +452,8 @@ TextureLayer composeCanvas(const TextureData& texture) {
     }
     return canvas;
 }
+
+void normalizeGameCubeStrip(std::vector<TextureLayer>& layers);
 
 void applyTxiLayout(TextureData& texture, bool inferCubeFromAspect = false) {
     if (texture.layers.size() != 1 || texture.layers.front().rgba.empty()) {
@@ -467,6 +481,7 @@ void applyTxiLayout(TextureData& texture, bool inferCubeFromAspect = false) {
                                                    canvas.width,
                                                    canvas.width));
             }
+            normalizeGameCubeStrip(texture.layers);
             texture.cubeMap = true;
             texture.cubeFaces = allCubeFaces();
             texture.animated = false;
@@ -486,8 +501,8 @@ void applyTxiLayout(TextureData& texture, bool inferCubeFromAspect = false) {
         }
         const auto requiredWidth = checkedDimensionProduct(layerWidth, features.numX, "TXI animation frame grid width");
         const auto requiredHeight = checkedDimensionProduct(layerHeight, features.numY, "TXI animation frame grid height");
-        if (requiredWidth > canvas.width || requiredHeight > canvas.height) {
-            throw TextureError("TXI animation grid does not fit within the source image");
+        if (requiredWidth != canvas.width || requiredHeight != canvas.height) {
+            throw TextureError("TXI animation grid must cover the source image exactly; pixels will not be silently cropped");
         }
 
         texture.layers.clear();
@@ -513,9 +528,6 @@ void applyTxiLayout(TextureData& texture, bool inferCubeFromAspect = false) {
 TextureCompression chooseAutoCompression(const TextureData& texture, const TextureSaveOptions& options) {
     if (options.compression != TextureCompression::Auto) {
         return options.compression;
-    }
-    if (texture.preferredCompression == TextureCompression::SwizzledBgra) {
-        return TextureCompression::SwizzledBgra;
     }
     const TxiFeatures features = parseTxiFeatures(texture.txi);
     if (features.isBumpMap && features.compressTextureSpecified && !features.compressTexture &&
@@ -543,6 +555,7 @@ TextureLayer flipLayerVerticalCopy(TextureLayer layer) {
     const std::size_t pitch = static_cast<std::size_t>(layer.width) * 4;
     std::vector<std::uint8_t> row(pitch);
     for (std::uint32_t y = 0; y < layer.height / 2; ++y) {
+        checkOperation();
         const std::uint32_t opposite = layer.height - 1 - y;
         auto a = layer.rgba.begin() + static_cast<std::ptrdiff_t>(static_cast<std::size_t>(y) * pitch);
         auto b = layer.rgba.begin() + static_cast<std::ptrdiff_t>(static_cast<std::size_t>(opposite) * pitch);
@@ -556,6 +569,7 @@ TextureLayer flipLayerVerticalCopy(TextureLayer layer) {
 
 TextureLayer flipLayerHorizontalCopy(TextureLayer layer) {
     for (std::uint32_t y = 0; y < layer.height; ++y) {
+        checkOperation();
         for (std::uint32_t x = 0; x < layer.width / 2; ++x) {
             const std::size_t a = (static_cast<std::size_t>(y) * layer.width + x) * 4;
             const std::size_t b = (static_cast<std::size_t>(y) * layer.width + (layer.width - 1 - x)) * 4;
@@ -625,24 +639,47 @@ TextureLayer rotateLayer90Copy(TextureLayer layer, unsigned times) {
     return rotated;
 }
 
-void normalizeTpcCubeMap(std::vector<TextureLayer>& layers) {
-    if (layers.size() != 6) throw TextureError("TPC cubemap must contain exactly six faces");
-    std::swap(layers[0], layers[1]);
-    // NeoTPC stores top-left-oriented pixels, which reverses the clockwise
-    // convention used by the original bottom-left renderer.
-    static constexpr unsigned rotations[6] = {3, 1, 0, 2, 2, 0};
-    for (std::size_t index = 0; index < layers.size(); ++index) {
-        layers[index] = rotateLayer90Copy(std::move(layers[index]), rotations[index]);
+// Internal cubemaps use +X,-X,+Y,-Y,+Z,-Z with top-left pixels.
+void orderCubeFaces(std::vector<TextureLayer>& layers, const std::vector<CubeFace>& faces,
+                    bool complete) {
+    if (complete && layers.size() != 6) throw TextureError("Game cubemap output requires all six faces");
+    if (faces.empty()) {
+        if (layers.size() != 6) throw TextureError("Partial cubemap is missing face identities");
+        return;
     }
+    if (faces.size() != layers.size()) throw TextureError("Cubemap face identities do not match layers");
+    std::set<CubeFace> unique(faces.begin(), faces.end());
+    if (unique.size() != faces.size()) throw TextureError("Cubemap contains duplicate face identities");
+    std::vector<TextureLayer> ordered;
+    for (auto face : kAllCubeFaces) {
+        const auto it = std::find(faces.begin(), faces.end(), face);
+        if (it != faces.end()) ordered.push_back(std::move(layers[static_cast<std::size_t>(it-faces.begin())]));
+    }
+    if (ordered.size() != layers.size()) throw TextureError("Cubemap has an unknown face identity");
+    layers = std::move(ordered);
 }
 
-void denormalizeTpcCubeMap(std::vector<TextureLayer>& layers) {
-    if (layers.size() != 6) throw TextureError("TPC cubemap must contain exactly six faces");
-    static constexpr unsigned inverseRotations[6] = {1, 3, 0, 2, 2, 0};
-    for (std::size_t index = 0; index < layers.size(); ++index) {
-        layers[index] = rotateLayer90Copy(std::move(layers[index]), inverseRotations[index]);
+// A game raw strip is indexed from its BOTTOM, not its top-left image view.
+// For stored strip i the engine selects target[i] and rotates the raw pixels.
+// Conjugating that rotation by the row flip reverses it in top-left space.
+constexpr std::array<std::size_t, 6> kStripTargets{{1, 0, 2, 3, 4, 5}};
+constexpr std::array<unsigned, 6> kStripRotations{{3, 1, 0, 2, 2, 0}};
+void normalizeGameCubeStrip(std::vector<TextureLayer>& topToBottom) {
+    if (topToBottom.size() != 6) throw TextureError("Cube strip requires six square faces");
+    std::vector<TextureLayer> faces(6);
+    for (std::size_t i = 0; i < 6; ++i) {
+        faces[kStripTargets[i]] = rotateLayer90Copy(std::move(topToBottom[5-i]),
+                                                   (4-kStripRotations[i]) % 4);
     }
-    std::swap(layers[0], layers[1]);
+    topToBottom = std::move(faces);
+}
+void denormalizeGameCubeStrip(std::vector<TextureLayer>& faces) {
+    if (faces.size() != 6) throw TextureError("Cube strip requires six square faces");
+    std::vector<TextureLayer> strip(6);
+    for (std::size_t i = 0; i < 6; ++i) {
+        strip[5-i] = rotateLayer90Copy(std::move(faces[kStripTargets[i]]), kStripRotations[i]);
+    }
+    faces = std::move(strip);
 }
 
 std::vector<TextureLayer> withSaveFlips(const std::vector<TextureLayer>& layers, const TextureSaveOptions& options) {
@@ -654,70 +691,79 @@ std::vector<TextureLayer> withSaveFlips(const std::vector<TextureLayer>& layers,
     return out;
 }
 
-std::array<std::uint8_t, 4> pixelAtClamped(const TextureLayer& layer, int x, int y) {
-    x = std::max(0, std::min<int>(x, static_cast<int>(layer.width) - 1));
-    y = std::max(0, std::min<int>(y, static_cast<int>(layer.height) - 1));
-    const std::size_t offset = (static_cast<std::size_t>(y) * layer.width + static_cast<std::uint32_t>(x)) * 4;
-    return {layer.rgba[offset], layer.rgba[offset + 1], layer.rgba[offset + 2], layer.rgba[offset + 3]};
+double srgbToLinear(double value) {
+    return value <= 0.04045 ? value / 12.92 : std::pow((value + 0.055) / 1.055, 2.4);
+}
+double linearToSrgb(double value) {
+    value = std::clamp(value, 0.0, 1.0);
+    return value <= 0.0031308 ? value * 12.92 : 1.055 * std::pow(value, 1.0 / 2.4) - 0.055;
+}
+double cubicWeight(double value) {
+    value = std::abs(value);
+    if (value < 1.0) return 1.5 * value * value * value - 2.5 * value * value + 1.0;
+    if (value < 2.0) return -0.5 * value * value * value + 2.5 * value * value - 4.0 * value + 2.0;
+    return 0.0;
 }
 
-double cubicInterpolate(double p0, double p1, double p2, double p3, double t) {
-    return p1 + 0.5 * t * (p2 - p0 + t * (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3 + t * (3.0 * (p1 - p2) + p3 - p0)));
-}
-
-TextureLayer downsampleLayer(const TextureLayer& source, bool bicubic) {
+TextureLayer downsampleLayer(const TextureLayer& source, const TextureSaveOptions& options) {
     const std::uint32_t dstW = std::max<std::uint32_t>(1, source.width / 2);
     const std::uint32_t dstH = std::max<std::uint32_t>(1, source.height / 2);
     TextureLayer out = makeLayer(dstW, dstH);
-
+    const double scaleX = static_cast<double>(source.width) / dstW;
+    const double scaleY = static_cast<double>(source.height) / dstH;
+    const bool opacity = options.mipmapAlpha == MipmapAlpha::Transparency;
+    const bool srgb = options.mipmapColor == MipmapColor::Srgb;
     for (std::uint32_t y = 0; y < dstH; ++y) {
+        checkOperation();
         for (std::uint32_t x = 0; x < dstW; ++x) {
-            const std::size_t dst = (static_cast<std::size_t>(y) * dstW + x) * 4;
-            if (!bicubic) {
-                const std::uint32_t sx = x * 2;
-                const std::uint32_t sy = y * 2;
-                for (std::size_t c = 0; c < 4; ++c) {
-                    unsigned sum = 0;
-                    unsigned count = 0;
-                    for (std::uint32_t yy = sy; yy < std::min(source.height, sy + 2); ++yy) {
-                        for (std::uint32_t xx = sx; xx < std::min(source.width, sx + 2); ++xx) {
-                            sum += source.rgba[(static_cast<std::size_t>(yy) * source.width + xx) * 4 + c];
-                            ++count;
-                        }
+            const double left = x * scaleX, top = y * scaleY;
+            const double right = (x + 1) * scaleX, bottom = (y + 1) * scaleY;
+            const double cx = (left + right) * 0.5, cy = (top + bottom) * 0.5;
+            const int x0 = static_cast<int>(std::floor(options.bicubicMipmaps ? cx - 2 * scaleX : left));
+            const int y0 = static_cast<int>(std::floor(options.bicubicMipmaps ? cy - 2 * scaleY : top));
+            const int x1 = static_cast<int>(std::ceil(options.bicubicMipmaps ? cx + 2 * scaleX : right));
+            const int y1 = static_cast<int>(std::ceil(options.bicubicMipmaps ? cy + 2 * scaleY : bottom));
+            double sum[4] = {}, weight = 0.0;
+            for (int sy = y0; sy < y1; ++sy) {
+                const double wy = options.bicubicMipmaps ? cubicWeight((sy + 0.5 - cy) / scaleY)
+                    : std::max(0.0, std::min(bottom, sy + 1.0) - std::max(top, static_cast<double>(sy)));
+                for (int sx = x0; sx < x1; ++sx) {
+                    const double wx = options.bicubicMipmaps ? cubicWeight((sx + 0.5 - cx) / scaleX)
+                        : std::max(0.0, std::min(right, sx + 1.0) - std::max(left, static_cast<double>(sx)));
+                    const double w = wx * wy;
+                    if (std::abs(w) < 1e-15) continue;
+                    const auto ix = std::clamp(sx, 0, static_cast<int>(source.width) - 1);
+                    const auto iy = std::clamp(sy, 0, static_cast<int>(source.height) - 1);
+                    const auto offset = (static_cast<std::size_t>(iy) * source.width + static_cast<unsigned>(ix)) * 4;
+                    const double alpha = source.rgba[offset + 3] / 255.0;
+                    for (int c = 0; c < 3; ++c) {
+                        double color = source.rgba[offset + c] / 255.0;
+                        if (srgb) color = srgbToLinear(color);
+                        sum[c] += color * w * (opacity ? alpha : 1.0);
                     }
-                    out.rgba[dst + c] = static_cast<std::uint8_t>((sum + count / 2) / std::max(1u, count));
-                }
-            } else {
-                const double srcX = (static_cast<double>(x) + 0.5) * source.width / dstW - 0.5;
-                const double srcY = (static_cast<double>(y) + 0.5) * source.height / dstH - 0.5;
-                const int ix = static_cast<int>(std::floor(srcX));
-                const int iy = static_cast<int>(std::floor(srcY));
-                const double tx = srcX - ix;
-                const double ty = srcY - iy;
-                for (std::size_t c = 0; c < 4; ++c) {
-                    double rows[4] = {};
-                    for (int row = -1; row <= 2; ++row) {
-                        double vals[4] = {};
-                        for (int col = -1; col <= 2; ++col) {
-                            vals[col + 1] = pixelAtClamped(source, ix + col, iy + row)[c];
-                        }
-                        rows[row + 1] = cubicInterpolate(vals[0], vals[1], vals[2], vals[3], tx);
-                    }
-                    out.rgba[dst + c] = clampByte(cubicInterpolate(rows[0], rows[1], rows[2], rows[3], ty));
+                    sum[3] += alpha * w;
+                    weight += w;
                 }
             }
+            const auto dst = (static_cast<std::size_t>(y) * dstW + x) * 4;
+            const double alpha = std::clamp(sum[3] / weight, 0.0, 1.0);
+            for (int c = 0; c < 3; ++c) {
+                double color = opacity ? (sum[3] > 1e-12 ? sum[c] / sum[3] : 0.0) : sum[c] / weight;
+                if (srgb) color = linearToSrgb(color);
+                out.rgba[dst + c] = clampByte(std::clamp(color, 0.0, 1.0) * 255.0);
+            }
+            out.rgba[dst + 3] = clampByte(alpha * 255.0);
         }
     }
     return out;
 }
 
-std::vector<TextureLayer> generateMipmaps(TextureLayer layer, bool bicubic, bool includeOnlyBase = false) {
+std::vector<TextureLayer> generateMipmaps(TextureLayer layer, const TextureSaveOptions& options) {
     std::vector<TextureLayer> mipmaps;
     layer.mipmaps.clear();
     mipmaps.push_back(std::move(layer));
-    if (includeOnlyBase) return mipmaps;
     while (mipmaps.back().width > 1 || mipmaps.back().height > 1) {
-        mipmaps.push_back(downsampleLayer(mipmaps.back(), bicubic));
+        mipmaps.push_back(downsampleLayer(mipmaps.back(), options));
     }
     return mipmaps;
 }
@@ -767,18 +813,20 @@ void decodeDxtColorBlock(const std::uint8_t* block, std::uint8_t* rgba, std::uin
     }
 }
 
-TextureLayer decodeDxt1(const std::uint8_t* data, std::size_t size, std::uint32_t width, std::uint32_t height) {
+TextureLayer decodeDxt1(const std::uint8_t* data, std::size_t size, std::uint32_t width, std::uint32_t height, bool rgbOnly = false) {
     TextureLayer layer = makeLayer(width, height);
     const std::uint32_t blocksX = (width + 3) / 4;
     const std::uint32_t blocksY = (height + 3) / 4;
     std::size_t offset = 0;
     for (std::uint32_t by = 0; by < blocksY; ++by) {
+        checkOperation();
         for (std::uint32_t bx = 0; bx < blocksX; ++bx) {
             if (offset + 8 > size) throw TextureError("DXT1 payload is truncated");
             decodeDxtColorBlock(data + offset, layer.rgba.data(), width, height, bx * 4, by * 4, false);
             offset += 8;
         }
     }
+    if (rgbOnly) for (std::size_t i = 3; i < layer.rgba.size(); i += 4) layer.rgba[i] = 255;
     return layer;
 }
 
@@ -788,6 +836,7 @@ TextureLayer decodeDxt3(const std::uint8_t* data, std::size_t size, std::uint32_
     const std::uint32_t blocksY = (height + 3) / 4;
     std::size_t offset = 0;
     for (std::uint32_t by = 0; by < blocksY; ++by) {
+        checkOperation();
         for (std::uint32_t bx = 0; bx < blocksX; ++bx) {
             if (offset + 16 > size) throw TextureError("DXT3 payload is truncated");
             decodeDxtColorBlock(data + offset + 8, layer.rgba.data(), width, height, bx * 4, by * 4, true);
@@ -811,6 +860,7 @@ TextureLayer decodeDxt5(const std::uint8_t* data, std::size_t size, std::uint32_
     const std::uint32_t blocksY = (height + 3) / 4;
     std::size_t offset = 0;
     for (std::uint32_t by = 0; by < blocksY; ++by) {
+        checkOperation();
         for (std::uint32_t bx = 0; bx < blocksX; ++bx) {
             if (offset + 16 > size) throw TextureError("DXT5 payload is truncated");
             decodeDxtColorBlock(data + offset + 8, layer.rgba.data(), width, height, bx * 4, by * 4, true);
@@ -1512,10 +1562,8 @@ TextureLayer decodeRawLayer(const std::uint8_t* data, std::size_t size, std::uin
 }
 
 std::string readTextSidecar(const std::filesystem::path& texturePath) {
-    auto sidecar = texturePath;
-    sidecar.replace_extension(".txi");
-    if (std::filesystem::exists(sidecar)) {
-        const auto bytes = readFileBytes(sidecar);
+    if (const auto sidecar = findTxiSidecar(texturePath)) {
+        const auto bytes = readFileBytes(*sidecar);
         return sanitizeTxiPayload(std::string(bytes.begin(), bytes.end()));
     }
     return {};
@@ -1561,7 +1609,11 @@ void commitTextureAndSidecar(const TextureData& texture,
     if (ec) throw TextureError("Unable to create texture output directory: " + ec.message());
 
     auto sidecar = output;
-    if (writeSidecar) sidecar.replace_extension(".txi");
+    if (writeSidecar) {
+        const auto existing = findTxiSidecar(output);
+        if (existing) sidecar = *existing;
+        else sidecar.replace_extension(".txi");
+    }
     const auto transaction = createTextureTransactionDirectory(parent);
     auto stagedImage = transaction / "staged-image";
     stagedImage.replace_extension(output.extension());
@@ -1590,6 +1642,8 @@ void commitTextureAndSidecar(const TextureData& texture,
                            std::vector<std::uint8_t>(texture.txi.begin(), texture.txi.end()));
         }
 
+        // Cancellation is allowed before commit, never midway through the pair.
+        checkOperation();
         // Move all existing outputs to rollback slots before installing any
         // replacement.  An empty staged sidecar means transactional deletion.
         for (auto& replacement : replacements) {
@@ -1661,10 +1715,9 @@ std::string normalizeTxiFooter(std::string txi) {
     return out;
 }
 
-// Odyssey animated TPCs do not use the ordinary "until both axes are 1"
-// mip chain for rectangular frames. The game-compatible chain ends when
-// either axis can no longer be halved. For example, a 256x64 frame stores
-// 256x64 through 4x1, but not 2x1 or 1x1.
+// Legacy NeoTPC rectangular animation reader fallback only. New game exports
+// require square frames and complete chains; the legacy packed rectangular
+// layout disagrees with the supplied games' width-derived frame stride.
 std::uint32_t animatedTpcMipCount(std::uint32_t width, std::uint32_t height) {
     if (width == 0 || height == 0) return 0;
     std::uint32_t count = 0;
@@ -1676,9 +1729,57 @@ std::uint32_t animatedTpcMipCount(std::uint32_t width, std::uint32_t height) {
     return count;
 }
 
+std::uint32_t fullMipCount(std::uint32_t width, std::uint32_t height) {
+    if (!width || !height) return 0;
+    std::uint32_t count = 1;
+    while (width > 1 || height > 1) {
+        width = std::max<std::uint32_t>(1, width / 2);
+        height = std::max<std::uint32_t>(1, height / 2);
+        ++count;
+    }
+    return count;
+}
+
+// Conflicting or malformed layout directives cannot define a safe byte layout.
+// Unchanged documents bypass encoding and retain even legacy metadata verbatim.
+void validateGameLayoutDirectives(const std::string& txi) {
+    static const std::set<std::string> keys = {
+        "cube", "mipmap", "proceduretype", "numx", "numy",
+        "defaultwidth", "defaultheight", "fps"
+    };
+    std::set<std::string> seen;
+    for (const auto& entry : parseTxiEntries(txi)) {
+        if (entry.blankOrComment || entry.listData || entry.listTerminator || !keys.count(entry.key)) continue;
+        if (!seen.insert(entry.key).second) {
+            throw TextureError("Duplicate TXI layout directive: " + entry.key + ". Keep one explicit value before encoding game output");
+        }
+    }
+    for (const auto& issue : validateTxiText(txi)) {
+        if (issue.severity == TxiIssueSeverity::Error && keys.count(issue.key)) {
+            throw TextureError("Invalid TXI layout directive: " + issue.message);
+        }
+    }
+}
+
+// The effective TXI flag and bytes must agree. Base-only encoding supplies an
+// explicit mipmap 0 if the caller did not specify a policy. Conflicts are errors.
+void prepareMipPolicy(TextureData& texture, bool storeMipmaps, bool cube) {
+    validateGameLayoutDirectives(texture.txi);
+    const auto features = parseTxiFeatures(texture.txi);
+    if (cube && features.mipmapSpecified && !features.mipmap) {
+        throw TextureError("Processed game cubemaps require mipmap 1; mipmap 0 makes the game reuse face zero");
+    }
+    if (!storeMipmaps) {
+        if (features.mipmapSpecified && features.mipmap) {
+            throw TextureError("Base-only output conflicts with TXI mipmap 1. Enable mip generation or set mipmap 0");
+        }
+        if (!features.mipmapSpecified) texture.txi = setTxiValue(texture.txi, "mipmap", "0");
+    }
+}
+
 std::vector<std::vector<TextureLayer>> makeMipChainPerLayer(const std::vector<TextureLayer>& layers,
                                                             bool generate,
-                                                            bool bicubic,
+                                                            const TextureSaveOptions& options,
                                                             bool tpcFileOrientation) {
     std::vector<std::vector<TextureLayer>> chains;
     chains.reserve(layers.size());
@@ -1688,7 +1789,7 @@ std::vector<std::vector<TextureLayer>> makeMipChainPerLayer(const std::vector<Te
         if (!generate) {
             layer.mipmaps.clear();
             chain.push_back(std::move(layer));
-        } else if (!layer.mipmaps.empty()) {
+        } else if (options.mipmapPolicy == MipmapPolicy::Preserve && !layer.mipmaps.empty()) {
             auto stored = std::move(layer.mipmaps);
             layer.mipmaps.clear();
             chain.push_back(std::move(layer));
@@ -1697,7 +1798,7 @@ std::vector<std::vector<TextureLayer>> makeMipChainPerLayer(const std::vector<Te
                 chain.push_back(std::move(mip));
             }
         } else {
-            chain = generateMipmaps(std::move(layer), bicubic, false);
+            chain = generateMipmaps(std::move(layer), options);
         }
         if (tpcFileOrientation) {
             for (auto& mip : chain) mip = flipLayerVerticalCopy(std::move(mip));
@@ -1708,6 +1809,52 @@ std::vector<std::vector<TextureLayer>> makeMipChainPerLayer(const std::vector<Te
 }
 
 } // namespace
+
+bool storesMipmaps(const TextureSaveOptions& options) noexcept {
+    return options.generateMipmaps && options.mipmapPolicy != MipmapPolicy::BaseOnly;
+}
+TextureFileKind kindForExtension(const std::filesystem::path& path) {
+    const auto ext = extensionLower(path);
+    if (ext == "tpc") return TextureFileKind::Tpc;
+    if (ext == "txb") return TextureFileKind::Txb;
+    if (ext == "tga") return TextureFileKind::Tga;
+    if (ext == "dds") return TextureFileKind::Dds;
+    if (ext == "png") return TextureFileKind::Png;
+    if (ext == "bmp") return TextureFileKind::Bmp;
+    if (ext == "jpg" || ext == "jpeg" || ext == "jpe") return TextureFileKind::Jpeg;
+    if (ext == "txi") return TextureFileKind::Txi;
+    return TextureFileKind::Unknown;
+}
+bool sameEncodingOptions(const TextureSaveOptions& a, const TextureSaveOptions& b,
+                         TextureFileKind kind, const TextureData& texture) {
+    if (kind == TextureFileKind::Txi) return true;
+    if (a.flipXOnSave != b.flipXOnSave || a.flipYOnSave != b.flipYOnSave) return false;
+    if (kind == TextureFileKind::Jpeg) return a.jpegQuality == b.jpegQuality;
+    if (kind != TextureFileKind::Tpc && kind != TextureFileKind::Dds && kind != TextureFileKind::Txb) return true;
+    const auto dialect = [&](const TextureSaveOptions& o) {
+        return o.ddsDialect != DdsDialect::Auto ? o.ddsDialect
+            : (texture.ddsDialect != DdsDialect::Auto ? texture.ddsDialect : DdsDialect::Game);
+    };
+    if (kind == TextureFileKind::Dds && dialect(a) != dialect(b)) return false;
+    const bool game = kind != TextureFileKind::Dds || dialect(a) == DdsDialect::Game;
+    if (game) {
+        const float av = a.alphaBlending.value_or(texture.alphaBlending);
+        const float bv = b.alphaBlending.value_or(texture.alphaBlending);
+        if (std::memcmp(&av, &bv, sizeof(float)) != 0) return false;
+    }
+    if (a.compression != b.compression || storesMipmaps(a) != storesMipmaps(b)) return false;
+    if (storesMipmaps(a)) {
+        if (a.mipmapPolicy != b.mipmapPolicy) return false;
+        const bool filtering = a.mipmapPolicy == MipmapPolicy::Rebuild || texture.sourceMipMapCount <= 1;
+        if (filtering && (a.bicubicMipmaps != b.bicubicMipmaps || a.mipmapAlpha != b.mipmapAlpha || a.mipmapColor != b.mipmapColor)) return false;
+    }
+    const auto compression = a.compression == TextureCompression::Auto
+        ? (texture.hasAlpha ? TextureCompression::Dxt5 : TextureCompression::Dxt1) : a.compression;
+    const bool dxt = compression == TextureCompression::Dxt1 || compression == TextureCompression::Dxt3 || compression == TextureCompression::Dxt5;
+    if (dxt && (a.dxtQuality != b.dxtQuality || a.dxtMetric != b.dxtMetric || a.weightColorByAlpha != b.weightColorByAlpha)) return false;
+    if (!game && compression == TextureCompression::Dxt1 && a.dxt1AlphaThreshold != b.dxt1AlphaThreshold) return false;
+    return true;
+}
 
 std::string textureCompressionToString(TextureCompression compression) {
     switch (compression) {
@@ -1805,6 +1952,10 @@ TxiFeatures parseTxiFeatures(const std::string& txi) {
         if (key == "cube") {
             if (auto v = parseU32Loose(rest)) features.cube = *v != 0;
             else features.cube = parseTruthy(rest);
+        } else if (key == "mipmap") {
+            features.mipmapSpecified = true;
+            if (auto v = parseU32Loose(rest)) features.mipmap = *v != 0;
+            else features.mipmap = !parseFalsy(rest);
         } else if (key == "proceduretype") {
             features.procedureType = asciiLower(trim(rest));
         } else if (key == "numx") {
@@ -1950,7 +2101,8 @@ std::uint8_t inferAnimatedTpcMipCount(const TpcContainerLayout& layout,
     // The animated header stores the complete payload size and uses a sentinel
     // mip count of 1. Infer the physical chain length from that payload so files
     // previously written by NeoTPC with an ordinary full rectangular chain can
-    // still be opened, while new files use the Odyssey-compatible chain.
+    // still be opened for inspection/conversion. This does NOT certify the
+    // legacy packed layout for game playback.
     std::uint32_t fullCount = 1;
     for (std::uint32_t w = layerWidth, h = layerHeight; w > 1 || h > 1; ) {
         w = std::max<std::uint32_t>(1, w / 2);
@@ -2096,10 +2248,98 @@ TpcContainerLayout inspectTpcContainer(const std::vector<std::uint8_t>& bytes) {
     if (!parser::checkedAdd(UINT64_C(128), payloadSize, txiOffset)) {
         throw TextureError("TPC payload offset overflows");
     }
-    layout.txiOffset = txiOffset > bytes.size()
-        ? bytes.size()
-        : static_cast<std::size_t>(txiOffset);
+    if (txiOffset > bytes.size()) {
+        throw TextureError("TPC payload is truncated: declared mipmaps extend beyond the file");
+    }
+    layout.txiOffset = static_cast<std::size_t>(txiOffset);
     return layout;
+}
+
+// Contract recovered from the supplied K1 i386 / K2 x86_64 resource loaders
+// and processed upload routines. This is deliberately stricter about bounds.
+std::vector<std::string> tpcGameLayoutIssues(const TpcContainerLayout& layout,
+                                           const TxiFeatures& features,
+                                           bool animated, bool cube,
+                                           std::uint32_t width, std::uint32_t height,
+                                           std::uint32_t layers, std::uint32_t storedMips,
+                                           std::size_t payloadBytes) {
+    std::vector<std::string> issues;
+    if (layout.encoding == kTpcEncodingSwizzledBgra) {
+        issues.push_back("Xbox swizzled pixels are not decoded by the supplied desktop game loaders; convert the encoding for desktop use.");
+    }
+    if (!std::isfinite(layout.alphaBlending)) issues.push_back("The TPC header float is not finite.");
+    if (features.cube != cube) issues.push_back("TXI cube flag disagrees with the processed face layout.");
+    if (cube && animated) issues.push_back("Combined cube animation is not supported by this exporter.");
+    if (cube && !features.mipmap) issues.push_back("Processed cubemap with mipmap 0 repeats face zero in the game.");
+    if (animated) {
+        if (width != height) issues.push_back("Rectangular animation frames do not match the game's square, width-derived frame stride. Use square frames; the atlas itself may be rectangular.");
+        if (features.numX == 0 || features.numY == 0 || features.fps <= 0 ||
+            static_cast<std::uint64_t>(features.numX) * features.numY != layers ||
+            static_cast<std::uint64_t>(width) * features.numX != layout.headerWidth ||
+            static_cast<std::uint64_t>(height) * features.numY != layout.headerHeight) {
+            issues.push_back("Animation grid/frame dimensions do not exactly match the stored canvas.");
+        }
+        if ((features.defaultWidth && features.defaultWidth != width) ||
+            (features.defaultHeight && features.defaultHeight != height)) {
+            issues.push_back("Animation defaultwidth/defaultheight disagree with the numx/numy frame dimensions.");
+        }
+    } else if (features.numX > 1 || features.numY > 1 || iequals(features.procedureType, "cycle")) {
+        issues.push_back("TXI requests animation/grid subdivision without matching stored animation frames.");
+    }
+    const bool gameCubeHeuristic = !layout.uncompressed && layout.headerWidth &&
+                                   layout.headerHeight / layout.headerWidth == 6;
+    if (gameCubeHeuristic && !cube) issues.push_back("The header height/width quotient is 6: the game treats this payload as six faces before reading TXI. Use a different atlas grid.");
+    if (cube && (width != height || layers != 6)) issues.push_back("A game cubemap requires six square faces.");
+
+    // Original footer arithmetic shifts BOTH dimensions towards zero, unlike
+    // the upload loop which keeps an exhausted axis at one.
+    const std::uint32_t faces = gameCubeHeuristic ? 6 : 1;
+    std::uint32_t w = layout.headerWidth;
+    std::uint32_t h = layout.headerHeight / faces;
+    std::uint64_t gameBytes = layout.uncompressed ? 0 : static_cast<std::uint64_t>(layout.dataSize) * faces;
+    const std::uint32_t bpp = (layout.encoding & 1) ? 1 : ((layout.encoding & 2) ? 3 : 4);
+    for (std::uint32_t mip = 0; mip < layout.mipMapCount; ++mip) {
+        if (layout.uncompressed) gameBytes += static_cast<std::uint64_t>(w) * h * bpp;
+        else if (mip) gameBytes += static_cast<std::uint64_t>((w + 3) / 4) * ((h + 3) / 4) * (bpp == 3 ? 8 : 16) * faces;
+        w /= 2; h /= 2;
+    }
+    if (gameBytes != payloadBytes) {
+        issues.push_back("Game TXI boundary differs from the encoded payload (game " + std::to_string(gameBytes) +
+                         " bytes, stored " + std::to_string(payloadBytes) +
+                         "). Rectangular static TPCs must use base-only storage with mipmap 0, or another format.");
+    }
+    const auto requiredMips = fullMipCount(width, height);
+    if ((features.mipmap || animated || cube) && storedMips != requiredMips) {
+        issues.push_back("The game requests a complete mip chain but the stored chain has " + std::to_string(storedMips) +
+                         " of " + std::to_string(requiredMips) + " levels.");
+    }
+    std::uint64_t storedStride = 0;
+    w = width; h = height;
+    for (std::uint32_t mip = 0; mip < storedMips; ++mip) {
+        storedStride += tpcMipPayloadSize(layout, w, h);
+        w = std::max<std::uint32_t>(1, w / 2); h = std::max<std::uint32_t>(1, h / 2);
+    }
+    if (storedStride * layers != payloadBytes) issues.push_back("Stored mip/face spans do not account for the entire image payload.");
+    if (!animated && !layout.uncompressed && layout.dataSize != tpcMipPayloadSize(layout, width, height)) {
+        issues.push_back("Compressed static/cube header size is not the size of its base level.");
+    }
+    if (animated) {
+        std::uint64_t gameStride = 0;
+        w = width;
+        do {
+            gameStride += tpcMipPayloadSize(layout, w, w);
+            w /= 2;
+        } while (w);
+        if (gameStride != storedStride) issues.push_back("The game's animation frame addresses do not match the stored frame addresses.");
+    }
+    return issues;
+}
+
+void requireCompatible(const std::vector<std::string>& issues) {
+    if (issues.empty()) return;
+    std::string message = "Cannot encode this layout for the supplied desktop game loaders:";
+    for (const auto& issue : issues) message += "\n- " + issue;
+    throw TextureError(message);
 }
 
 } // namespace
@@ -2492,12 +2732,15 @@ TextureData readTgaTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
     texture.layers.push_back(std::move(layer));
     texture.txi = std::move(txi);
     texture.sourceEncoding = std::to_string(pixelSize) + "-bit TGA" + (rle ? " RLE" : "");
+    if ((bytes[17] & 0x30) != 0) {
+        texture.compatibilityWarnings.push_back("This TGA uses an origin flag ignored by the supplied game loaders. Explicit conversion writes bottom-origin rows; an unchanged Save preserves the source.");
+    }
     refreshHasAlpha(texture);
     applyTxiLayout(texture, true);
     return texture;
 }
 
-static void writeTgaTexture(const TextureData& texture, const std::filesystem::path& output) {
+static std::vector<std::uint8_t> encodeTgaTexture(const TextureData& texture) {
     if (!texture.hasPixels()) throw TextureError("Cannot write TGA without pixel data");
     const TextureLayer canvas = composeCanvas(texture);
     validateLayer(canvas);
@@ -2507,40 +2750,38 @@ static void writeTgaTexture(const TextureData& texture, const std::filesystem::p
     writeLE16(out, 12, static_cast<std::uint16_t>(canvas.width));
     writeLE16(out, 14, static_cast<std::uint16_t>(canvas.height));
     out[16] = 32;
-    out[17] = 0x28; // 8 alpha bits, origin top-left
+    out[17] = 0x08; // 8 alpha bits; bottom origin, as consumed by the game
     out.reserve(18 + canvas.rgba.size());
     for (std::uint32_t y = 0; y < canvas.height; ++y) {
         for (std::uint32_t x = 0; x < canvas.width; ++x) {
-            const std::size_t src = (static_cast<std::size_t>(y) * canvas.width + x) * 4;
+            const std::size_t src = (static_cast<std::size_t>(canvas.height - 1 - y) * canvas.width + x) * 4;
             out.push_back(canvas.rgba[src + 2]);
             out.push_back(canvas.rgba[src + 1]);
             out.push_back(canvas.rgba[src + 0]);
             out.push_back(canvas.rgba[src + 3]);
         }
     }
-    writeFileBytes(output, out);
+    return out;
 }
 
-static void writePngTexture(const TextureData& texture, const std::filesystem::path& output) {
+static std::vector<std::uint8_t> encodePngTexture(const TextureData& texture) {
     if (!texture.hasPixels()) throw TextureError("Cannot write PNG without pixel data");
     const TextureLayer canvas = composeCanvas(texture);
     validateLayer(canvas);
-    writeFileBytes(output, internal_image::encodePngRgba(canvas.width, canvas.height, canvas.rgba));
+    return internal_image::encodePngRgba(canvas.width, canvas.height, canvas.rgba);
 }
 
-static void writeJpegTexture(const TextureData& texture,
-                      const std::filesystem::path& output,
-                      const TextureSaveOptions& options) {
+static std::vector<std::uint8_t> encodeJpegTexture(const TextureData& texture, const TextureSaveOptions& options) {
     if (!texture.hasPixels()) throw TextureError("Cannot write JPEG without pixel data");
     const TextureLayer canvas = composeCanvas(texture);
     validateLayer(canvas);
-    writeFileBytes(output, internal_image::encodeJpegRgb(canvas.width,
+    return internal_image::encodeJpegRgb(canvas.width,
                                                          canvas.height,
                                                          canvas.rgba,
-                                                         static_cast<std::uint8_t>(std::max<int>(1, std::min<int>(100, options.jpegQuality)))));
+                                                         static_cast<std::uint8_t>(std::max<int>(1, std::min<int>(100, options.jpegQuality))));
 }
 
-static void writeBmpTexture(const TextureData& texture, const std::filesystem::path& output) {
+static std::vector<std::uint8_t> encodeBmpTexture(const TextureData& texture) {
     if (!texture.hasPixels()) throw TextureError("Cannot write BMP without pixel data");
     const TextureLayer canvas = composeCanvas(texture);
     validateLayer(canvas);
@@ -2581,7 +2822,7 @@ static void writeBmpTexture(const TextureData& texture, const std::filesystem::p
             out.push_back(canvas.rgba[src + 3]);
         }
     }
-    writeFileBytes(output, out);
+    return out;
 }
 
 TextureData readTpcTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
@@ -2628,6 +2869,10 @@ TextureData readTpcTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
         }
     }
 
+    if (mipMapCount > fullMipCount(layerWidth, layerHeight)) {
+        throw TextureError("TPC declares mip levels beyond 1x1");
+    }
+
     std::uint64_t oneLayerDecodedBytes = 0;
     std::uint32_t budgetWidth = layerWidth;
     std::uint32_t budgetHeight = layerHeight;
@@ -2671,12 +2916,11 @@ TextureData readTpcTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
         for (std::uint8_t mip = 0; mip < mipMapCount; ++mip) {
             const std::size_t size = mipSize(w, h);
             if (offset + size > payloadLimit) {
-                if (mip == 0) throw TextureError("TPC payload is truncated before layer data");
-                break;
+                throw TextureError("TPC payload is truncated before a declared mipmap");
             }
             TextureLayer decoded;
             if (!uncompressed && compression == TextureCompression::Dxt1) {
-                decoded = flipLayerVerticalCopy(decodeDxt1(bytes.data() + offset, size, w, h));
+                decoded = flipLayerVerticalCopy(decodeDxt1(bytes.data() + offset, size, w, h, true));
             } else if (!uncompressed && compression == TextureCompression::Dxt5) {
                 decoded = flipLayerVerticalCopy(decodeDxt5(bytes.data() + offset, size, w, h));
             } else {
@@ -2696,9 +2940,16 @@ TextureData readTpcTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
         texture.layers.push_back(std::move(layer));
     }
     if (cubeMap) {
-        normalizeTpcCubeMap(texture.layers);
+        // Processed TPC stores the renderer face order directly.
         texture.cubeFaces = allCubeFaces();
     }
+    if (offset != payloadLimit) throw TextureError("TPC declared payload does not match its decoded layer/mip spans");
+    texture.compatibilityWarnings = tpcGameLayoutIssues(layout, features, animated, cubeMap,
+                                                       layerWidth, layerHeight, layerCount, mipMapCount,
+                                                       payloadLimit - 128);
+    try { validateGameLayoutDirectives(texture.txi); }
+    catch (const TextureError& e) { texture.compatibilityWarnings.push_back(e.what()); }
+    if (bytes[13] == 0) texture.compatibilityWarnings.push_back("Zero mip-count header has nonportable game footer semantics.");
     refreshHasAlpha(texture);
     return texture;
 }
@@ -2808,17 +3059,19 @@ TextureData readTxbTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
     return texture;
 }
 
-static void writeTpcTexture(const TextureData& input, const std::filesystem::path& output, const TextureSaveOptions& options) {
+static std::vector<std::uint8_t> encodeTpcTexture(const TextureData& input, const TextureSaveOptions& options) {
     if (!input.hasPixels()) throw TextureError("Cannot write TPC without pixel data");
     TextureData texture = input;
+    validateGameLayoutDirectives(texture.txi);
+    applyTxiLayout(texture);
     refreshHasAlpha(texture);
     std::vector<TextureLayer> layers = withSaveFlips(texture.layers, options);
     if (layers.empty()) throw TextureError("No texture layers to write");
     const bool hasAlpha = std::any_of(layers.begin(), layers.end(), layerHasAlpha);
     TextureCompression compression = chooseAutoCompression(texture, options);
     if (compression == TextureCompression::Dxt1 && hasAlpha) {
-        // Match tga2tpc's automatic spirit: do not throw away alpha unless user explicitly forced DXT1.
         if (options.compression == TextureCompression::Auto) compression = TextureCompression::Dxt5;
+        else throw TextureError("Game TPC DXT1 is RGB-only, not punch-through alpha. Use DXT5, or explicitly make alpha opaque before encoding.");
     }
 
     const TxiFeatures features = parseTxiFeatures(texture.txi);
@@ -2831,13 +3084,10 @@ static void writeTpcTexture(const TextureData& input, const std::filesystem::pat
     if ((animated || cube) && compression != TextureCompression::Dxt1 && compression != TextureCompression::Dxt5) {
         throw TextureError("TPC animated/cube textures require DXT compression in this implementation");
     }
-    if (compression == TextureCompression::SwizzledBgra &&
-        std::any_of(layers.begin(), layers.end(), [](const TextureLayer& layer) {
-            return !isPowerOfTwo(layer.width) || !isPowerOfTwo(layer.height);
-        })) {
-        throw TextureError("Xbox swizzled BGRA TPC output requires power-of-two layer dimensions");
+    if (compression == TextureCompression::SwizzledBgra) {
+        throw TextureError("Xbox swizzled TPC output is not desktop-compatible. Choose raw, DXT1 or DXT5; Xbox inputs remain readable and can be saved unchanged.");
     }
-    if (cube) denormalizeTpcCubeMap(layers);
+    if (cube) orderCubeFaces(layers, texture.cubeFaces, true);
 
     const auto& first = layers.front();
     for (const auto& layer : layers) {
@@ -2851,7 +3101,10 @@ static void writeTpcTexture(const TextureData& input, const std::filesystem::pat
         if (layers.size() != frameCount) {
             throw TextureError("TPC animation layer count does not match the TXI grid");
         }
-        const auto requiredMipCount = animatedTpcMipCount(first.width, first.height);
+        if (first.width != first.height) {
+            throw TextureError("Rectangular animation frames are not supported for game TPC output. Use square frames (a rectangular atlas is allowed), or export an image atlas instead.");
+        }
+        const auto requiredMipCount = fullMipCount(first.width, first.height);
         if (requiredMipCount == 0) throw TextureError("TPC animation frames have invalid dimensions");
         for (auto& layer : layers) {
             if (layer.mipmaps.size() + 1 != requiredMipCount) layer.mipmaps.clear();
@@ -2861,10 +3114,17 @@ static void writeTpcTexture(const TextureData& input, const std::filesystem::pat
     // Animated TPC stores a sentinel mip count in the header; readers derive a
     // game-specific chain from each frame's dimensions, so animation output
     // must carry that chain even when ordinary mip generation is off.
-    const bool generate = (options.generateMipmaps || animated) && compression != TextureCompression::Gray;
-    auto mipChains = makeMipChainPerLayer(layers, generate, options.bicubicMipmaps, true);
+    const bool generate = (storesMipmaps(options) || animated) && compression != TextureCompression::Gray;
+    if (cube && !generate) throw TextureError("Game TPC cubemaps require complete mip chains; enable Generate mipmaps");
+    if (!animated && !cube && first.width != first.height && generate) {
+        throw TextureError("Rectangular static TPC mip chains disagree with the game TXI boundary. Disable mip generation (mipmap 0), or use TGA/game DDS instead");
+    }
+    prepareMipPolicy(texture, generate, cube);
+    if (cube && !features.cube) texture.txi = setTxiValue(texture.txi, "cube", "1");
+    if (!std::isfinite(options.alphaBlending.value_or(input.alphaBlending))) throw TextureError("TPC header float must be finite");
+    auto mipChains = makeMipChainPerLayer(layers, generate, options, true);
     if (animated) {
-        const auto requiredMipCount = static_cast<std::size_t>(animatedTpcMipCount(first.width, first.height));
+        const auto requiredMipCount = static_cast<std::size_t>(fullMipCount(first.width, first.height));
         for (auto& chain : mipChains) {
             if (chain.size() < requiredMipCount) {
                 throw TextureError("TPC animation mipmap chain is incomplete");
@@ -2872,10 +3132,17 @@ static void writeTpcTexture(const TextureData& input, const std::filesystem::pat
             chain.resize(requiredMipCount);
         }
     }
+    for (const auto& chain : mipChains) {
+        if (chain.size() != mipChains.front().size() || chain.size() > fullMipCount(first.width, first.height)) {
+            throw TextureError("TPC faces/frames must have the same mip count, without levels beyond 1x1");
+        }
+    }
     const std::uint8_t mipMapCount = static_cast<std::uint8_t>(std::min<std::size_t>(255, mipChains.front().size()));
 
     auto encodeMip = [&](const TextureLayer& layer) -> std::vector<std::uint8_t> {
-        return encodeLayerRaw(layer, compression, hasAlpha, options);
+        auto nativeOptions = options;
+        if (compression == TextureCompression::Dxt1) nativeOptions.dxt1AlphaThreshold = 0;
+        return encodeLayerRaw(layer, compression, hasAlpha, nativeOptions);
     };
 
     std::uint32_t headerWidth = first.width;
@@ -2886,10 +3153,13 @@ static void writeTpcTexture(const TextureData& input, const std::filesystem::pat
         headerWidth = checkedDimensionProduct(first.width, features.numX, "TPC animation width");
         headerHeight = checkedDimensionProduct(first.height, features.numY, "TPC animation height");
     } else if (texture.canvasWidth > 0 && texture.canvasHeight > 0 && layers.size() == 1) {
+        if (texture.canvasWidth != first.width || texture.canvasHeight != first.height) {
+            throw TextureError("Static TPC canvas dimensions disagree with its pixel layer");
+        }
         headerWidth = texture.canvasWidth;
         headerHeight = texture.canvasHeight;
     }
-    if (headerWidth > 0xFFFF || headerHeight > 0xFFFF) throw TextureError("TPC dimensions exceed 16-bit header limits");
+    if (headerWidth >= 0x8000 || headerHeight >= 0x8000) throw TextureError("TPC canvas dimensions exceed the supported positive Odyssey range");
 
     std::uint8_t tpcEncoding = kTpcEncodingRgba;
     std::uint32_t headerDataSize = 0;
@@ -2926,7 +3196,7 @@ static void writeTpcTexture(const TextureData& input, const std::filesystem::pat
 
     std::vector<std::uint8_t> out(128, 0);
     writeLE32(out, 0, headerDataSize);
-    writeLEFloat(out, 4, options.alphaBlending);
+    writeLEFloat(out, 4, options.alphaBlending.value_or(input.alphaBlending));
     writeLE16(out, 8, static_cast<std::uint16_t>(headerWidth));
     writeLE16(out, 10, static_cast<std::uint16_t>(headerHeight));
     out[12] = tpcEncoding;
@@ -2938,9 +3208,13 @@ static void writeTpcTexture(const TextureData& input, const std::filesystem::pat
             out.insert(out.end(), encoded.begin(), encoded.end());
         }
     }
+    const auto payloadBytes = out.size() - 128;
+    requireCompatible(tpcGameLayoutIssues(inspectTpcContainer(out), parseTxiFeatures(texture.txi),
+                                          animated, cube, first.width, first.height,
+                                          static_cast<std::uint32_t>(layers.size()), mipMapCount, payloadBytes));
     const std::string txi = normalizeTxiFooter(texture.txi);
     out.insert(out.end(), txi.begin(), txi.end());
-    writeFileBytes(output, out);
+    return out;
 }
 
 namespace {
@@ -3139,6 +3413,8 @@ TextureData readDdsTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
 
     if (bytes.size() >= 128 && bytes[0] == 'D' && bytes[1] == 'D' && bytes[2] == 'S' && bytes[3] == ' ') {
         if (readLE32(bytes, 4) != 124) throw TextureError("DDS header size is not 124");
+        texture.ddsDialect = DdsDialect::Standard;
+        texture.notes += "Standard DDS is an interchange format; use explicit Game DDS conversion for these game resource readers. ";
         const std::uint32_t flags = readLE32(bytes, 8);
         const std::uint32_t height = readLE32(bytes, 12);
         const std::uint32_t width = readLE32(bytes, 16);
@@ -3255,6 +3531,9 @@ TextureData readDdsTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
         const std::uint32_t height = readLE32(bytes, 4);
         const std::uint32_t bpp = readLE32(bytes, 8);
         const std::uint32_t dataSize = readLE32(bytes, 12);
+        texture.ddsDialect = DdsDialect::Game;
+        texture.alphaBlending = readLEFloat(bytes, 16);
+        if (!std::isfinite(texture.alphaBlending)) throw TextureError("BioWare DDS header float is not finite");
         if (width == 0 || height == 0 || width >= 0x8000 || height >= 0x8000 || (bpp != 3 && bpp != 4)) {
             throw TextureError("Invalid BioWare DDS header");
         }
@@ -3268,7 +3547,10 @@ TextureData readDdsTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
         std::uint64_t decodedBytes = 0;
         while (mipCount < 255) {
             const auto size = ddsMipSize(storage, mipWidth, mipHeight);
-            if (!parser::rangeWithin(bytes.size(), offset, size)) break;
+            if (!parser::rangeWithin(bytes.size(), offset, size)) {
+                if (offset != bytes.size()) throw TextureError("BioWare DDS ends partway through a mipmap");
+                break;
+            }
             std::uint64_t nextDecodedBytes = 0;
             if (!parser::checkedAdd(decodedBytes,
                                     checkedRgbaByteCount(mipWidth, mipHeight, "BioWare DDS mipmap"),
@@ -3276,7 +3558,11 @@ TextureData readDdsTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
                 throw TextureError("BioWare DDS mipmaps exceed the decoded-image memory limit");
             }
             decodedBytes = nextDecodedBytes;
-            auto decoded = decodeDdsMip(bytes.data() + offset, size, mipWidth, mipHeight, storage);
+            auto decoded = flipLayerVerticalCopy(
+                decodeDdsMip(bytes.data() + offset, size, mipWidth, mipHeight, storage));
+            if (storage == DdsStorage::Dxt1) {
+                for (std::size_t i = 3; i < decoded.rgba.size(); i += 4) decoded.rgba[i] = 255;
+            }
             if (mipCount == 0) layer = std::move(decoded);
             else layer.mipmaps.push_back(std::move(decoded));
             ++mipCount;
@@ -3286,6 +3572,14 @@ TextureData readDdsTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
             mipHeight = std::max<std::uint32_t>(1, mipHeight / 2);
         }
         if (mipCount == 0) throw TextureError("BioWare DDS contains no complete mipmap");
+        if (offset != bytes.size()) throw TextureError("BioWare DDS has unexplained trailing payload");
+        const auto baseSize = ddsMipSize(storage, width, height);
+        if (dataSize != baseSize && dataSize != bytes.size() - 20) {
+            texture.compatibilityWarnings.push_back("BioWare DDS size field does not match its base or total payload.");
+        }
+        if (parseTxiFeatures(texture.txi).mipmap && mipCount != fullMipCount(width, height)) {
+            texture.compatibilityWarnings.push_back("BioWare DDS has an incomplete mip chain while mipmapping is enabled.");
+        }
         texture.canvasWidth = width;
         texture.canvasHeight = height;
         texture.layers.push_back(std::move(layer));
@@ -3293,13 +3587,70 @@ TextureData readDdsTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
         texture.preferredCompression = bpp == 3 ? TextureCompression::Dxt1 : TextureCompression::Dxt5;
         texture.compressed = true;
         texture.sourceEncoding = bpp == 3 ? "BioWare DDS DXT1" : "BioWare DDS DXT5";
+        try { validateGameLayoutDirectives(texture.txi); }
+        catch (const TextureError& e) { texture.compatibilityWarnings.push_back(e.what()); }
+        const auto flags = parseTxiFeatures(texture.txi);
+        if (flags.cube || flags.numX > 1 || flags.numY > 1 || iequals(flags.procedureType, "cycle")) {
+            texture.compatibilityWarnings.push_back("This game DDS requests cube/animation layout; only a single static game DDS surface is supported for encoding.");
+        }
     }
     refreshHasAlpha(texture);
     applyTxiLayout(texture);
     return texture;
 }
 
-static void writeDdsTexture(const TextureData& texture, const std::filesystem::path& output, const TextureSaveOptions& options) {
+static std::vector<std::uint8_t> encodeGameDdsTexture(const TextureData& input, const TextureSaveOptions& options) {
+    if (!input.hasPixels()) throw TextureError("Cannot write DDS without pixels");
+    TextureData texture = input;
+    const auto features = parseTxiFeatures(texture.txi);
+    if (texture.cubeMap || texture.animated || texture.layers.size() != 1 || features.cube ||
+        features.numX > 1 || features.numY > 1 || iequals(features.procedureType, "cycle")) {
+        throw TextureError("Game DDS export currently supports a single static surface. Use TPC for a supported cube/animation, or explicitly select standard DDS for interchange");
+    }
+    auto layers = withSaveFlips(texture.layers, options);
+    auto compression = options.compression;
+    if (compression == TextureCompression::Auto) {
+        compression = layerHasAlpha(layers.front()) ? TextureCompression::Dxt5 : TextureCompression::Dxt1;
+    }
+    if (compression != TextureCompression::Dxt1 && compression != TextureCompression::Dxt5) {
+        throw TextureError("Game DDS supports DXT1 or DXT5. Select one of those, or standard DDS for other encodings");
+    }
+    if (compression == TextureCompression::Dxt1 && layerHasAlpha(layers.front())) {
+        throw TextureError("Game DDS DXT1 is RGB-only, not punch-through alpha. Use DXT5, or explicitly make alpha opaque before encoding.");
+    }
+    prepareMipPolicy(texture, storesMipmaps(options), false);
+    const auto chains = makeMipChainPerLayer(layers, storesMipmaps(options), options, true);
+    const auto& chain = chains.front();
+    const auto& base = chain.front();
+    if (base.width >= 0x8000 || base.height >= 0x8000) throw TextureError("Game DDS dimensions exceed the supported positive Odyssey range");
+    if (chain.size() > fullMipCount(base.width, base.height)) throw TextureError("Game DDS contains mip levels beyond 1x1");
+    if (parseTxiFeatures(texture.txi).mipmap && chain.size() != fullMipCount(base.width, base.height)) {
+        throw TextureError("Game DDS mipmapping requires a complete chain to 1x1");
+    }
+    const float alpha = options.alphaBlending.value_or(texture.alphaBlending);
+    if (!std::isfinite(alpha)) throw TextureError("Game DDS header float must be finite");
+    std::vector<std::uint8_t> out(20, 0);
+    writeLE32(out, 0, base.width);
+    writeLE32(out, 4, base.height);
+    writeLE32(out, 8, compression == TextureCompression::Dxt1 ? 3 : 4);
+    writeLE32(out, 12, static_cast<std::uint32_t>(bytesForEncoding(compression, base.width, base.height, true)));
+    writeLEFloat(out, 16, alpha);
+    for (const auto& mip : chain) {
+        auto nativeOptions = options;
+        if (compression == TextureCompression::Dxt1) nativeOptions.dxt1AlphaThreshold = 0;
+        const auto bytes = encodeLayerRaw(mip, compression, true, nativeOptions);
+        out.insert(out.end(), bytes.begin(), bytes.end());
+    }
+    return out;
+}
+
+DdsDialect effectiveDdsDialect(const TextureData& texture, const TextureSaveOptions& options) {
+    if (options.ddsDialect != DdsDialect::Auto) return options.ddsDialect;
+    if (texture.kind == TextureFileKind::Dds && texture.ddsDialect != DdsDialect::Auto) return texture.ddsDialect;
+    return DdsDialect::Game;
+}
+
+static std::vector<std::uint8_t> encodeDdsTexture(const TextureData& texture, const TextureSaveOptions& options) {
     if (!texture.hasPixels()) throw TextureError("Cannot write DDS without pixel data");
     TextureData copy = texture;
     refreshHasAlpha(copy);
@@ -3357,7 +3708,7 @@ static void writeDdsTexture(const TextureData& texture, const std::filesystem::p
     if (compression == TextureCompression::Gray || compression == TextureCompression::SwizzledBgra) {
         compression = TextureCompression::None;
     }
-    auto chains = makeMipChainPerLayer(layers, options.generateMipmaps, options.bicubicMipmaps, false);
+    auto chains = makeMipChainPerLayer(layers, storesMipmaps(options), options, false);
     const std::size_t mipCount = chains.front().size();
     for (const auto& chain : chains) {
         if (chain.size() != mipCount) throw TextureError("DDS cubemap faces have different mipmap counts");
@@ -3416,7 +3767,7 @@ static void writeDdsTexture(const TextureData& texture, const std::filesystem::p
     for (const auto& face : encoded) {
         for (const auto& mip : face) out.insert(out.end(), mip.begin(), mip.end());
     }
-    writeFileBytes(output, out);
+    return out;
 }
 
 static TextureData readTxiTexture(const std::filesystem::path& path) {
@@ -3470,10 +3821,10 @@ TextureData loadTextureBytes(const std::vector<std::uint8_t>& bytes,
 std::string imageCodecSupportReport() {
     std::ostringstream out;
     out << "Texture image codec support:\n";
-    out << "  TPC: built-in read/write for raw, grayscale, Xbox-swizzled BGRA, DXT1/BC1, and DXT5/BC3 textures; mipmaps, cubemap faces, and rectangular animation frames are preserved\n";
+    out << "  TPC: storage-checked raw/grayscale/DXT1/DXT5 output; square animation frames; base-only rectangular static output; legacy/Xbox input remains readable\n";
     out << "  TXB: built-in read-only conversion support for Xbox swizzled BGRA/grayscale and DXT1/DXT5 textures\n";
-    out << "  DDS: built-in read/write for pitched BGRA/BGR, A1R5G5B5, R5G6B5, ARGB4444, DXT1/DXT3/DXT5, mipmaps, and full or partial cubemaps\n";
-    out << "  TGA: built-in read/write\n";
+    out << "  DDS: game 20-byte-header DXT1/DXT5 output (default for new files), or explicit standard DDS interchange; imported dialect is retained\n";
+    out << "  TGA: origin-aware input, bottom-origin game output, raw cube-strip conversion\n";
     out << "  BMP: built-in read/write for 1/4/8-bit paletted and 16/24/32-bit truecolor BMP\n";
     out << "  PNG: provided by the external libspng dependency\n";
     out << "  JPEG/JPG: provided through the libjpeg API (vcpkg uses libjpeg-turbo); alpha is dropped on JPEG output\n";
@@ -3481,49 +3832,58 @@ std::string imageCodecSupportReport() {
     return out.str();
 }
 
-void saveTexture(const TextureData& texture, const std::filesystem::path& output, const TextureSaveOptions& options) {
+EncodedTexture encodeTexture(const TextureData& input, const std::filesystem::path& output,
+                              const TextureSaveOptions& options) {
+    checkOperation();
     const std::string ext = extensionLower(output);
-    const bool sidecar = textureKindUsesTxiSidecar(ext);
-    if (ext == "tga") {
-        commitTextureAndSidecar(texture, output, sidecar, [&](const auto& staged) { writeTgaTexture(texture, staged); });
-        return;
-    }
-    if (ext == "png") {
-        commitTextureAndSidecar(texture, output, sidecar, [&](const auto& staged) { writePngTexture(texture, staged); });
-        return;
-    }
-    if (ext == "jpg" || ext == "jpeg" || ext == "jpe") {
-        commitTextureAndSidecar(texture, output, sidecar, [&](const auto& staged) { writeJpegTexture(texture, staged, options); });
-        return;
-    }
-    if (ext == "bmp") {
-        commitTextureAndSidecar(texture, output, sidecar, [&](const auto& staged) { writeBmpTexture(texture, staged); });
-        return;
-    }
-    if (ext == "tpc") {
-        commitTextureAndSidecar(texture, output, false, [&](const auto& staged) { writeTpcTexture(texture, staged, options); });
-        return;
-    }
-    if (ext == "dds") {
-        commitTextureAndSidecar(texture, output, sidecar, [&](const auto& staged) { writeDdsTexture(texture, staged, options); });
-        return;
-    }
-    if (ext == "txb") {
-        throw TextureError("TXB is supported as an input/conversion format only; choose TPC, DDS, TGA, PNG, JPEG, or BMP output");
-    }
-    if (ext == "txi") {
-        commitTextureAndSidecar(texture, output, false, [&](const auto& staged) {
-            writeFileBytes(staged, std::vector<std::uint8_t>(texture.txi.begin(), texture.txi.end()));
-        });
-        return;
-    }
-    throw TextureError("Unsupported texture output extension: " + ext + " (expected .tga, .png, .jpg, .bmp, .tpc, .dds, or .txi)");
+    const bool flat = ext == "tga" || ext == "png" || ext == "bmp" || ext == "jpg" || ext == "jpeg" || ext == "jpe";
+    TextureData texture = input;
+    if (flat && texture.cubeMap && !parseTxiFeatures(texture.txi).cube)
+        texture.txi = setTxiValue(texture.txi, "cube", "1");
+    if (flat && (options.flipXOnSave || options.flipYOnSave)) texture.layers = withSaveFlips(texture.layers, options);
+    auto applied = options;
+    if (flat) { applied.flipXOnSave = false; applied.flipYOnSave = false; }
+    if (ext == "dds" && effectiveDdsDialect(texture, applied) == DdsDialect::Game)
+        prepareMipPolicy(texture, storesMipmaps(applied), false);
+    EncodedTexture result;
+    if (textureKindUsesTxiSidecar(ext) && !texture.txi.empty())
+        result.sidecar.emplace(texture.txi.begin(), texture.txi.end());
+    if (ext == "tga") result.image = encodeTgaTexture(texture);
+    else if (ext == "png") result.image = encodePngTexture(texture);
+    else if (ext == "jpg" || ext == "jpeg" || ext == "jpe") result.image = encodeJpegTexture(texture, applied);
+    else if (ext == "bmp") result.image = encodeBmpTexture(texture);
+    else if (ext == "tpc") result.image = encodeTpcTexture(texture, applied);
+    else if (ext == "dds") result.image = effectiveDdsDialect(texture, applied) == DdsDialect::Game
+        ? encodeGameDdsTexture(texture, applied) : encodeDdsTexture(texture, applied);
+    else if (ext == "txi") result.image.assign(texture.txi.begin(), texture.txi.end());
+    else throw TextureError("Unsupported output extension: " + ext + ". Choose TPC, DDS, TGA, PNG, JPEG, BMP or TXI.");
+    checkOperation();
+    return result;
+}
+
+void saveTexture(const TextureData& texture, const std::filesystem::path& output, const TextureSaveOptions& options) {
+    const auto encoded = encodeTexture(texture, output, options);
+    saveEncodedTexture(encoded.image, encoded.sidecar, output);
+}
+
+void saveEncodedTexture(const std::vector<std::uint8_t>& imageBytes,
+                        const std::optional<std::vector<std::uint8_t>>& sidecarBytes,
+                        const std::filesystem::path& output) {
+    TextureData metadata;
+    if (sidecarBytes) metadata.txi.assign(sidecarBytes->begin(), sidecarBytes->end());
+    commitTextureAndSidecar(metadata, output, textureKindUsesTxiSidecar(extensionLower(output)),
+        [&](const auto& staged) { writeFileBytes(staged, imageBytes); }, sidecarBytes.has_value());
 }
 
 void replaceTpcEmbeddedTxi(const std::filesystem::path& tpcPath,
                            const std::string& txi) {
     if (tpcPath.empty()) throw TextureError("TPC path is empty");
-    const auto original = readFileBytes(tpcPath);
+    saveTpcWithEmbeddedTxi(readFileBytes(tpcPath), txi, tpcPath);
+}
+
+std::vector<std::uint8_t> patchTpcTxiBytes(const std::vector<std::uint8_t>& original, const std::string& txi) {
+    const std::filesystem::path tpcPath("preview.tpc");
+    validateGameLayoutDirectives(txi);
     const auto layout = inspectTpcContainer(original);
     const auto originalTexture = readTpcTextureBytesInternal(original, tpcPath);
     const std::string normalizedTxi = normalizeTxiFooter(txi);
@@ -3538,6 +3898,7 @@ void replaceTpcEmbeddedTxi(const std::filesystem::path& tpcPath,
     // This catches TXI animation layouts that are incompatible with the
     // existing encoded payload.
     const auto replacementTexture = readTpcTextureBytesInternal(replacement, tpcPath);
+    requireCompatible(replacementTexture.compatibilityWarnings);
     if (replacementTexture.cubeMap != originalTexture.cubeMap ||
         replacementTexture.animated != originalTexture.animated ||
         replacementTexture.layers.size() != originalTexture.layers.size()) {
@@ -3558,10 +3919,13 @@ void replaceTpcEmbeddedTxi(const std::filesystem::path& tpcPath,
         }
     }
 
-    TextureData placeholder;
-    commitTextureAndSidecar(placeholder, tpcPath, false, [&](const auto& staged) {
-        writeFileBytes(staged, replacement);
-    });
+    return replacement;
+}
+
+void saveTpcWithEmbeddedTxi(const std::vector<std::uint8_t>& original,
+                           const std::string& txi, const std::filesystem::path& tpcPath) {
+    const auto bytes = patchTpcTxiBytes(original, txi);
+    saveEncodedTexture(bytes, {}, tpcPath);
 }
 
 TgaTxiPairPaths saveTgaTxiPair(const TextureData& texture,
@@ -3573,11 +3937,16 @@ TgaTxiPairPaths saveTgaTxiPair(const TextureData& texture,
         throw TextureError("Cannot create a TGA/TXI pair without pixel data");
     }
 
-    commitTextureAndSidecar(texture, outputTga, true,
-                            [&](const auto& staged) { writeTgaTexture(texture, staged); },
+    auto converted = texture;
+    if (converted.cubeMap && !parseTxiFeatures(converted.txi).cube) {
+        converted.txi = setTxiValue(converted.txi, "cube", "1");
+    }
+    commitTextureAndSidecar(converted, outputTga, true,
+                            [&](const auto& staged) { writeFileBytes(staged, encodeTgaTexture(converted)); },
                             true);
     auto txiPath = outputTga;
     txiPath.replace_extension(".txi");
+    if(auto existing=findTxiSidecar(outputTga))txiPath=*existing;
     return {outputTga, std::move(txiPath)};
 }
 
@@ -3655,6 +4024,10 @@ std::string textureSummary(const TextureData& texture) {
         out << "TXI validation: " << txiErrors << " error(s), " << txiWarnings << " warning(s)\n";
     }
     if (!texture.notes.empty()) out << "notes: " << texture.notes << '\n';
+    if (!texture.compatibilityWarnings.empty()) {
+        out << "\nGame compatibility warnings (readable is not game certification):\n";
+        for (const auto& warning : texture.compatibilityWarnings) out << "- " << warning << '\n';
+    }
     return out.str();
 }
 
@@ -3677,16 +4050,16 @@ std::string textureMetadataText(const TextureData& texture, const TextureSaveOpt
         << "bicubicMipmaps=" << (options.bicubicMipmaps ? "true" : "false") << '\n'
         << "flipXOnSave=" << (options.flipXOnSave ? "true" : "false") << '\n'
         << "flipYOnSave=" << (options.flipYOnSave ? "true" : "false") << '\n'
-        << "alphaBlending=" << options.alphaBlending << '\n'
+        << "alphaBlending=" << options.alphaBlending.value_or(texture.alphaBlending) << '\n'
         << "jpegQuality=" << static_cast<unsigned>(options.jpegQuality) << '\n';
     return out.str();
 }
 
 void setTextureAlpha(TextureData& texture, std::uint8_t alpha) {
     for (auto& layer : texture.layers) {
-        for (std::size_t i = 3; i < layer.rgba.size(); i += 4) layer.rgba[i] = alpha;
+        for (std::size_t i = 3; i < layer.rgba.size(); i += 4) { if((i & 262143u)==3)checkOperation(); layer.rgba[i] = alpha; }
         for (auto& mip : layer.mipmaps) {
-            for (std::size_t i = 3; i < mip.rgba.size(); i += 4) mip.rgba[i] = alpha;
+            for (std::size_t i = 3; i < mip.rgba.size(); i += 4) { if((i & 262143u)==3)checkOperation(); mip.rgba[i] = alpha; }
         }
     }
     refreshHasAlpha(texture);
@@ -3697,9 +4070,9 @@ void scaleTextureAlpha(TextureData& texture, double scale) {
         throw TextureError("Alpha scale must be a finite, non-negative number");
     }
     for (auto& layer : texture.layers) {
-        for (std::size_t i = 3; i < layer.rgba.size(); i += 4) layer.rgba[i] = clampByte(layer.rgba[i] * scale);
+        for (std::size_t i = 3; i < layer.rgba.size(); i += 4) { if((i & 262143u)==3)checkOperation(); layer.rgba[i] = clampByte(layer.rgba[i] * scale); }
         for (auto& mip : layer.mipmaps) {
-            for (std::size_t i = 3; i < mip.rgba.size(); i += 4) mip.rgba[i] = clampByte(mip.rgba[i] * scale);
+            for (std::size_t i = 3; i < mip.rgba.size(); i += 4) { if((i & 262143u)==3)checkOperation(); mip.rgba[i] = clampByte(mip.rgba[i] * scale); }
         }
     }
     refreshHasAlpha(texture);
@@ -3707,9 +4080,9 @@ void scaleTextureAlpha(TextureData& texture, double scale) {
 
 void invertTextureAlpha(TextureData& texture) {
     for (auto& layer : texture.layers) {
-        for (std::size_t i = 3; i < layer.rgba.size(); i += 4) layer.rgba[i] = static_cast<std::uint8_t>(255 - layer.rgba[i]);
+        for (std::size_t i = 3; i < layer.rgba.size(); i += 4) { if((i & 262143u)==3)checkOperation(); layer.rgba[i] = static_cast<std::uint8_t>(255 - layer.rgba[i]); }
         for (auto& mip : layer.mipmaps) {
-            for (std::size_t i = 3; i < mip.rgba.size(); i += 4) mip.rgba[i] = static_cast<std::uint8_t>(255 - mip.rgba[i]);
+            for (std::size_t i = 3; i < mip.rgba.size(); i += 4) { if((i & 262143u)==3)checkOperation(); mip.rgba[i] = static_cast<std::uint8_t>(255 - mip.rgba[i]); }
         }
     }
     refreshHasAlpha(texture);

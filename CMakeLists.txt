@@ -6,31 +6,7 @@ endif()
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "MSVC runtime library" FORCE)
 
 project(NeoTPC VERSION 1.0.0 DESCRIPTION "C++17/wxWidgets Odyssey texture viewer and converter" LANGUAGES CXX)
-set(NEOSHARED_ROOT "" CACHE PATH
-    "Path to the neoshared source repository; defaults to ../neoshared")
-
-if(NOT NEOSHARED_ROOT AND DEFINED ENV{NEOSHARED_ROOT}
-   AND NOT "$ENV{NEOSHARED_ROOT}" STREQUAL "")
-    set(NEOSHARED_ROOT "$ENV{NEOSHARED_ROOT}" CACHE PATH
-        "Path to the neoshared source repository" FORCE)
-endif()
-
-if(NOT NEOSHARED_ROOT)
-    get_filename_component(NEOSHARED_ROOT
-        "${CMAKE_CURRENT_LIST_DIR}/../neoshared" ABSOLUTE)
-else()
-    get_filename_component(NEOSHARED_ROOT "${NEOSHARED_ROOT}" ABSOLUTE
-        BASE_DIR "${CMAKE_CURRENT_LIST_DIR}")
-endif()
-set(NEOSHARED_ROOT "${NEOSHARED_ROOT}" CACHE PATH
-    "Path to the neoshared source repository" FORCE)
-
-if(NOT EXISTS "${NEOSHARED_ROOT}/CMakeLists.txt")
-    message(FATAL_ERROR
-        "neoshared was not found at '${NEOSHARED_ROOT}'. "
-        "Clone the neoshared repository beside this repository, or configure "
-        "with -DNEOSHARED_ROOT=/path/to/neoshared.")
-endif()
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/NeoSharedSource.cmake")
 
 if(MSVC)
     foreach(_neo_runtime_flag_var IN ITEMS
@@ -98,6 +74,7 @@ add_library(neotpc_texture
     src/texture/FileUtil.cpp
     src/texture/Image.cpp
     src/texture/InternalImageCodecs.cpp
+    src/texture/JpegCodec.cpp
     src/texture/Txi.cpp
 )
 target_include_directories(neotpc_texture
@@ -271,8 +248,6 @@ if(NEOTPC_BUILD_WX_GUI)
         message(WARNING "wxWidgets was not found. NeoTPC core and CLI targets will still build.")
     endif()
 endif()
-
-set(NEOTPC_DOC_DIR "${CMAKE_INSTALL_DATAROOTDIR}/doc/NeoTPC")
 
 neo_force_static_msvc_runtime_for_directory_targets()
 neo_apply_minimal_release_to_directory_targets()
