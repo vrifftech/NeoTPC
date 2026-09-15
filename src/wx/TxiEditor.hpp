@@ -22,7 +22,9 @@ public:
 
     explicit TxiEditor(wxWindow* parent, wxWindowID id = wxID_ANY);
 
-    void setValue(const wxString& value);
+    // Refreshing the current document keeps its caret, selection and viewport.
+    // A new document explicitly requests a reset.
+    void setValue(const wxString& value, bool preserveView = true);
     wxString value() const;
     void applyTheme(bool darkMode);
     void goToOneBasedLine(std::size_t lineNumber);

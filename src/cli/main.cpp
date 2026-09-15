@@ -181,7 +181,10 @@ void printUsage(std::ostream& out) {
         "  --set-alpha 0..255 | --scale-alpha <factor> | --invert-alpha\n"
         "  --txi <metadata.txi> | --set-txi <key> <value>\n"
         "Batch options:\n"
-        "  --recursive | --no-recursive | --overwrite | --skip-conflicts\n";
+        "  --recursive | --no-recursive | --overwrite | --skip-conflicts\n"
+        "  --input-type <ext> (default: all supported)\n"
+        "  --preserve-matching (default: exact copy for matching format/dialect)\n"
+        "  --reencode-matching (apply encoding settings to matching inputs too)\n";
 }
 
 int commandInfo(const std::vector<std::string>& args) {
@@ -306,6 +309,12 @@ int commandBatch(const std::vector<std::string>& args) {
             batch.recursive = true;
         } else if (option == "--no-recursive") {
             batch.recursive = false;
+        } else if (option == "--input-type") {
+            batch.inputExtension = nextValue(args, index, option);
+        } else if (option == "--reencode-matching") {
+            batch.preserveMatchingFormat = false;
+        } else if (option == "--preserve-matching") {
+            batch.preserveMatchingFormat = true;
         } else if (option == "--skip-conflicts") {
             batch.skipConflicts = true;
         } else if (option == "--overwrite") {

@@ -15,6 +15,8 @@ TextureCanvas::TextureCanvas(wxWindow* parent):wxPanel(parent,wxID_ANY,wxDefault
     Bind(wxEVT_KILL_FOCUS,[this](wxFocusEvent& e){Refresh(false);e.Skip();});
 }
 void TextureCanvas::setImage(const wxImage& image){
+    if (image_.IsOk() && image.IsOk() && image_.GetData() == image.GetData() &&
+        image_.GetWidth() == image.GetWidth() && image_.GetHeight() == image.GetHeight()) return;
     const bool reset=!hasImage()||image_.GetWidth()!=image.GetWidth()||image_.GetHeight()!=image.GetHeight();
     image_=image;cache_=wxBitmap{};message_.clear();if(reset)view_=View{};Refresh(false);
 }

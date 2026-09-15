@@ -13,31 +13,23 @@
 
 namespace neotpc {
 namespace {
-std::string canonicalTxiFooter(std::string txi) {
-    auto first = txi.begin();
-    while (first != txi.end() && std::isspace(static_cast<unsigned char>(*first))) ++first;
-    auto last = txi.end();
-    while (last != first && std::isspace(static_cast<unsigned char>(*(last - 1)))) --last;
-    txi = std::string(first, last);
-    if (txi.empty()) return {};
-
-    std::string normalized;
-    normalized.reserve(txi.size() + 2);
-    for (std::size_t index = 0; index < txi.size(); ++index) {
-        const char ch = txi[index];
-        if (ch == '\r') {
-            if (index + 1 < txi.size() && txi[index + 1] == '\n') ++index;
-            normalized += "\r\n";
-        } else if (ch == '\n') {
-            normalized += "\r\n";
-        } else {
-            normalized.push_back(ch);
-        }
-    }
-    if (normalized.size() < 2 || normalized.compare(normalized.size() - 2, 2, "\r\n") != 0) {
-        normalized += "\r\n";
-    }
-    return normalized;
+bool sameLayerPixels(const texture::TextureLayer& a, const texture::TextureLayer& b) {
+    texture::checkOperation();
+    if (a.width != b.width || a.height != b.height || a.rgba != b.rgba || a.mipmaps.size() != b.mipmaps.size()) return false;
+    for (std::size_t i = 0; i < a.mipmaps.size(); ++i)
+        if (!sameLayerPixels(a.mipmaps[i], b.mipmaps[i])) return false;
+    return true;
+}
+bool samePixels(const texture::TextureData& a, const texture::TextureData& b) {
+    if (a.canvasWidth != b.canvasWidth || a.canvasHeight != b.canvasHeight || a.layers.size() != b.layers.size() ||
+        a.cubeMap != b.cubeMap || a.animated != b.animated || a.cubeFaces != b.cubeFaces) return false;
+    for (std::size_t i = 0; i < a.layers.size(); ++i)
+        if (!sameLayerPixels(a.layers[i], b.layers[i])) return false;
+    return true;
+}
+std::filesystem::path sidecarPath(const std::filesystem::path& path) {
+    if (const auto existing = texture::findTxiSidecar(path)) return *existing;
+    auto result = path; result.replace_extension(".txi"); return result;
 }
 
 std::optional<std::vector<std::uint8_t>> readSidecar(const std::filesystem::path& path) {
@@ -68,16 +60,7 @@ bool sameAllOptions(const texture::TextureSaveOptions& a, const texture::Texture
         a.weightColorByAlpha == b.weightColorByAlpha && a.dxt1AlphaThreshold == b.dxt1AlphaThreshold &&
         a.jpegQuality == b.jpegQuality;
 }
-texture::TextureSaveOptions importedOptions(const texture::TextureData& data) {
-    texture::TextureSaveOptions o;
-    o.compression = data.preferredCompression == texture::TextureCompression::SwizzledBgra
-        ? texture::TextureCompression::Auto : data.preferredCompression;
-    o.generateMipmaps = (data.kind == texture::TextureFileKind::Tpc || data.kind == texture::TextureFileKind::Dds ||
-                         data.kind == texture::TextureFileKind::Txb) ? data.sourceMipMapCount > 1 : true;
-    o.mipmapPolicy = o.generateMipmaps ? texture::MipmapPolicy::Preserve : texture::MipmapPolicy::BaseOnly;
-    o.alphaBlending = data.alphaBlending;
-    return o;
-}
+
 } // namespace
 
 void TextureDocument::open(const std::filesystem::path& path) {
@@ -88,12 +71,19 @@ void TextureDocument::open(const std::filesystem::path& path) {
     sidecarBytes_ = std::move(sidecar);
     texture_ = std::move(loaded);
     path_ = path;
-    options_ = importedOptions(texture_);
+    options_ = texture::importedTextureOptions(texture_);
     open_ = true;
     ++revision_;
     pixelRevision_ = ++nextPixelRevision_;
     undo_.clear(); redo_.clear(); historyPixels_.reset(); editGroup_.clear();
     resetSavedState();
+}
+bool TextureDocument::reloadIfSourceChanged() {
+    if (!open_) return false;
+    if (texture::readFileBytes(path_) == sourceBytes_ && readSidecar(path_) == sidecarBytes_) return false;
+    const auto sourcePath = path_;
+    open(sourcePath);
+    return true;
 }
 void TextureDocument::close() noexcept {
     open_ = false; txiDirty_ = contentDirty_ = optionsDirty_ = false;
@@ -127,7 +117,7 @@ void TextureDocument::beforeEdit(const std::string& label, bool coalesce) {
     trimHistory();
 }
 void TextureDocument::refreshDirty() {
-    txiDirty_ = canonicalTxiFooter(texture_.txi) != canonicalTxiFooter(savedTxi_);
+    txiDirty_ = texture_.txi != savedTxi_;
     contentDirty_ = pixelRevision_ != savedPixelRevision_;
     optionsDirty_ = !texture::sameEncodingOptions(options_, savedOptions_, texture_.kind, texture_);
 }
@@ -151,9 +141,12 @@ void TextureDocument::editPixels(const std::string& label, const std::function<v
     // failure leaves both the document and its history unchanged.
     auto next = texture_;
     edit(next);
+    if (samePixels(texture_, next)) return; // Do not dirty/recompress a no-op.
     beforeEdit(label);
     texture_ = std::move(next);
-    historyPixels_.reset(); pixelRevision_ = ++nextPixelRevision_; ++revision_;
+    historyPixels_.reset();
+    pixelRevision_ = ++nextPixelRevision_;
+    ++revision_;
     refreshDirty();
 }
 void TextureDocument::setAlpha(std::uint8_t value) { editPixels("Set alpha", [=](auto& t) { texture::setTextureAlpha(t, value); }); }
@@ -190,17 +183,49 @@ void TextureDocument::requireSourceUnchanged() const {
         throw texture::TextureError("This texture or its TXI changed on disk after opening. Reopen it or export to another name; external changes were not overwritten.");
 }
 
+bool TextureDocument::outputTouchesSource(const std::filesystem::path& output) const {
+    if (!open_ || output.empty()) return false;
+    std::vector<std::filesystem::path> sources{path_}, outputs{output};
+    if (texture::usesTxiSidecar(path_)) sources.push_back(sidecarPath(path_));
+    if (texture::usesTxiSidecar(output)) outputs.push_back(sidecarPath(output));
+    for (const auto& to : outputs) for (const auto& from : sources)
+        if (samePath(to, from)) return true;
+    return false;
+}
+void TextureDocument::validateExportDestination(const std::filesystem::path& output) const {
+    if (!open_ || output.empty()) throw texture::TextureError("Choose an open texture and an export destination.");
+    if (outputTouchesSource(output))
+        throw texture::TextureError("Export would change the open source image or its TXI: " + texture::pathToUtf8(path_) +
+            ". Choose a separate export folder, or use Save to update this document.");
+}
+
+std::string TextureDocument::outputIssue(const std::filesystem::path& output, const texture::TextureSaveOptions& o) const {
+    using namespace texture;
+    if (!open_) return "Open a texture first.";
+    const auto kind = kindForExtension(output);
+    if (kind == TextureFileKind::Unknown || kind == TextureFileKind::Txb) return "Choose a supported output format.";
+    if (kind == TextureFileKind::Txi) return {};
+    if (!texture_.hasPixels()) return "This document contains TXI only; it has no image pixels to export.";
+    const bool preserved = kind == texture_.kind && !contentDirty_ && !txiDirty_ && sameEncodingOptions(o, savedOptions_, kind, texture_);
+    if (preserved) return {}; // Copying is not a claim that an old file is compatible.
+    return texture::textureOutputIssue(texture_, output, o);
+
+}
+
+bool TextureDocument::outputPreservesImage(const std::filesystem::path& output, const texture::TextureSaveOptions& options) const {
+    return open_ && texture::kindForExtension(output) == texture_.kind && !contentDirty_ &&
+        texture::sameEncodingOptions(options, savedOptions_, texture_.kind, texture_);
+}
 TexturePreview TextureDocument::preview(const std::filesystem::path& output, const texture::TextureSaveOptions& options) const {
     using namespace texture;
     if (!open_ || output.empty()) throw TextureError("No texture or output format selected");
     TexturePreview result;
     result.outputKind = kindForExtension(output); result.options = options; result.revision = revision_;
-    const bool sameFormat = result.outputKind == texture_.kind;
-    const bool reencode = !sameFormat || contentDirty_ || !sameEncodingOptions(options, savedOptions_, result.outputKind, texture_);
+    const bool reencode = !outputPreservesImage(output, options);
     if (!reencode && !txiDirty_) {
         result.encoded = {sourceBytes_, sidecarBytes_}; result.pixelsPreserved = true;
     } else if (!reencode && texture_.kind == TextureFileKind::Tpc) {
-        result.encoded.image = patchTpcTxiBytes(sourceBytes_, texture_.txi); result.pixelsPreserved = true;
+        result.encoded.image = patchTpcTxiBytes(sourceBytes_, texture_.txi, true); result.pixelsPreserved = true;
     } else if (!reencode && usesTxiSidecar(output)) {
         result.encoded.image = sourceBytes_;
         if (!texture_.txi.empty()) result.encoded.sidecar.emplace(texture_.txi.begin(), texture_.txi.end());
@@ -208,6 +233,17 @@ TexturePreview TextureDocument::preview(const std::filesystem::path& output, con
     } else result.encoded = encodeTexture(texture_, output, options);
     result.decoded = loadTextureBytes(result.encoded.image, output,
         result.encoded.sidecar ? std::string(result.encoded.sidecar->begin(), result.encoded.sidecar->end()) : std::string());
+    if (reencode && result.outputKind == TextureFileKind::Tpc) {
+        auto exactTxi = texture_.txi;
+        for (const auto& entry : parseTxiEntries(result.decoded.txi)) {
+            if (getTxiValue(exactTxi, entry.key) != getTxiValue(result.decoded.txi, entry.key))
+                exactTxi = setTxiValue(exactTxi, entry.key, entry.value);
+        }
+        if (exactTxi != result.decoded.txi) {
+            result.encoded.image = patchTpcTxiBytes(result.encoded.image, exactTxi, true);
+            result.decoded.txi = std::move(exactTxi);
+        }
+    }
     if (txiDirty_ && result.pixelsPreserved && result.decoded.ddsDialect == DdsDialect::Game && !result.decoded.compatibilityWarnings.empty())
         throw TextureError(result.decoded.compatibilityWarnings.front());
     return result;
@@ -218,24 +254,26 @@ void TextureDocument::commitPreview(const std::filesystem::path& output, const T
         throw TextureError("This encoded preview is stale. Preview the current document and output settings again before saving.");
     const bool sameSource = samePath(output, path_);
     if (sameSource) requireSourceUnchanged();
-    if (!adopt && sameSource) throw TextureError("Export cannot silently replace the open source. Use Save/Save As, or choose a different export name.");
-    if (sameSource && staged.encoded.image == sourceBytes_ && staged.encoded.sidecar == sidecarBytes_) {
-        finishEditGroup(); return;
-    }
+    if (!adopt || !sameSource) validateExportDestination(output);
+    const bool bytesUnchanged = sameSource && staged.encoded.image == sourceBytes_ &&
+        staged.encoded.sidecar == sidecarBytes_;
     // Decode/copy before replacing the file, so allocation/parse errors cannot
     // leave a saved file with an unreported invalid editor state.
     if(!adopt){saveEncodedTexture(staged.encoded.image,staged.encoded.sidecar,output);return;}
     auto next = staged.decoded;
     auto bytes = staged.encoded.image;
     auto sidecar = staged.encoded.sidecar;
-    saveEncodedTexture(bytes, sidecar, output);
+    const bool pixelsUnchanged = samePixels(texture_, next);
+    if (!bytesUnchanged) saveEncodedTexture(bytes, sidecar, output);
     sourceBytes_ = std::move(bytes); sidecarBytes_ = std::move(sidecar);
     texture_ = std::move(next); texture_.sourcePath = output; path_ = output;
-    options_ = importedOptions(texture_);
+    options_ = texture::importedTextureOptions(texture_);
     options_.dxtQuality = staged.options.dxtQuality; options_.dxtMetric = staged.options.dxtMetric;
     options_.weightColorByAlpha = staged.options.weightColorByAlpha; options_.dxt1AlphaThreshold = staged.options.dxt1AlphaThreshold;
     options_.jpegQuality = staged.options.jpegQuality;
-    historyPixels_.reset(); pixelRevision_ = ++nextPixelRevision_; ++revision_;
+    historyPixels_.reset();
+    if (!pixelsUnchanged) pixelRevision_ = ++nextPixelRevision_;
+    ++revision_;
     finishEditGroup(); resetSavedState();
 }
 void TextureDocument::saveTo(const std::filesystem::path& output) {
@@ -249,6 +287,55 @@ void TextureDocument::saveTo(const std::filesystem::path& output) {
 }
 void TextureDocument::save() { saveTo(path_); }
 void TextureDocument::saveAs(const std::filesystem::path& output) { saveTo(output); }
+std::string TextureDocument::exportSummary(const std::filesystem::path& output, const texture::TextureSaveOptions& opts,
+                                            const TexturePreview* staged) const {
+    if (!open_) return "Open a texture first.";
+    const auto kind = texture::kindForExtension(output);
+    const auto issue = outputIssue(output, opts);
+    const bool stagedValid = staged && staged->revision == revision() && staged->outputKind == kind &&
+        texture::sameEncodingOptions(staged->options, opts, kind, texture());
+    const bool preserved = outputPreservesImage(output, opts);
+    const auto* result = stagedValid ? &staged->decoded : (preserved ? &texture() : nullptr);
+    std::string text = "Output: " + texture::pathToUtf8(output) + "\n";
+    if (kind == texture::TextureFileKind::Txi) text += "TXI — metadata only";
+    else if (kind == texture::TextureFileKind::Dds) {
+        const bool standard = result ? result->ddsDialect == texture::DdsDialect::Standard :
+            opts.ddsDialect == texture::DdsDialect::Standard ||
+            (opts.ddsDialect == texture::DdsDialect::Auto && texture().ddsDialect == texture::DdsDialect::Standard);
+        text += standard ? "Standard DDS" : "Game DDS";
+    } else text += texture::textureFileKindToString(kind);
+    if (kind == texture::TextureFileKind::Tpc || kind == texture::TextureFileKind::Dds) {
+        if (result) {
+            text += " | " + texture::textureCompressionToString(result->preferredCompression);
+            text += " | " + std::to_string(result->sourceMipMapCount) + " mip level(s)";
+        } else {
+            text += " | " + texture::textureCompressionToString(opts.compression);
+            text += "\nMipmaps: ";
+            text += !texture::storesMipmaps(opts) ? "Base only" : opts.mipmapPolicy == texture::MipmapPolicy::Rebuild ? "Rebuild" : "Preserve existing / create if absent";
+        }
+    } else if (kind != texture::TextureFileKind::Txi) {
+        text += result ? " | " + result->sourceEncoding : (kind == texture::TextureFileKind::Jpeg ? " | JPEG (lossy)" : " | Uncompressed/lossless image");
+        text += " | base image only";
+    }
+    if (texture::usesTxiSidecar(output)) {
+        auto txi = output; txi.replace_extension(".txi");
+        text += "\nTXI companion";
+        if (stagedValid) text += staged->encoded.sidecar ? " (will write): " : " (absent; stale output TXI removed): ";
+        else text += " (when present): ";
+        text += texture::pathToUtf8(txi);
+    }
+    if (!issue.empty()) text += "\n" + issue;
+    else if (preserved) text += txiDirty() ? "\nEncoded image preserved — metadata updated." : "\nExact encoded copy — no recompression. Existing compatibility warnings are unchanged.";
+    else if (stagedValid) text += "\nEncoded preview ready. Export writes these staged bytes.";
+    else text += "\nReady for encoded preview; the encoder checks the complete layout before writing.";
+    if (layoutPending()) text += "\nLayout changes pending: the current image keeps its loaded layout. Preview encoded output to inspect the proposed layout.";
+    if (stagedValid) {
+        text += "\nPreview: " + std::to_string(staged->encoded.image.size()) + " bytes";
+        if (staged->encoded.sidecar) text += "; TXI " + std::to_string(staged->encoded.sidecar->size()) + " bytes";
+    }
+    if (result) for (const auto& warning : result->compatibilityWarnings) text += "\n" + warning;
+    return text;
+}
 std::string TextureDocument::summary() const {
     if (!open_) return "No texture is open.\n";
     std::ostringstream out;

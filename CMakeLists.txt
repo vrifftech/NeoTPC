@@ -3,12 +3,14 @@ cmake_minimum_required(VERSION 3.16)
 if(POLICY CMP0091)
     cmake_policy(SET CMP0091 NEW)
 endif()
-set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "MSVC runtime library" FORCE)
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR AND NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "MSVC runtime library")
+endif()
 
 project(NeoTPC VERSION 1.0.0 DESCRIPTION "C++17/wxWidgets Odyssey texture viewer and converter" LANGUAGES CXX)
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/NeoSharedSource.cmake")
 
-if(MSVC)
+if(MSVC AND CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     foreach(_neo_runtime_flag_var IN ITEMS
         CMAKE_C_FLAGS CMAKE_C_FLAGS_DEBUG CMAKE_C_FLAGS_RELEASE CMAKE_C_FLAGS_RELWITHDEBINFO CMAKE_C_FLAGS_MINSIZEREL
         CMAKE_CXX_FLAGS CMAKE_CXX_FLAGS_DEBUG CMAKE_CXX_FLAGS_RELEASE CMAKE_CXX_FLAGS_RELWITHDEBINFO CMAKE_CXX_FLAGS_MINSIZEREL)
@@ -19,7 +21,7 @@ if(MSVC)
 endif()
 
 function(neo_force_static_msvc_runtime target_name)
-    if(MSVC AND TARGET ${target_name})
+    if(MSVC AND TARGET ${target_name} AND CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
         set_property(TARGET ${target_name} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
         target_compile_options(${target_name} PRIVATE
             $<$<CONFIG:Debug>:/MTd>
@@ -50,15 +52,24 @@ if(NOT TARGET neoshared::wx)
     add_subdirectory("${NEOSHARED_ROOT}"
         "${CMAKE_CURRENT_BINARY_DIR}/neoshared" EXCLUDE_FROM_ALL)
 endif()
-# Codec implementations are external dependencies. The vcpkg manifest installs
+if(NOT TARGET neoshared::texture)
+    message(FATAL_ERROR "The published NeoShared checkout is missing the shared texture library. Publish the complete updated NeoShared repository before building NeoTPC.")
+endif()
+# Only PNG/JPEG interchange needs external codec dependencies. The vcpkg manifest installs
 # the pinned dependency graph automatically when the vcpkg toolchain is active.
-find_package(SPNG CONFIG REQUIRED)
+find_package(SPNG CONFIG QUIET)
+if(NOT TARGET spng::spng AND NOT TARGET spng::spng_static)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(NEOTPC_SPNG REQUIRED IMPORTED_TARGET spng)
+endif()
 find_package(JPEG REQUIRED)
 
 if(TARGET spng::spng)
     set(NEOTPC_SPNG_TARGET spng::spng)
 elseif(TARGET spng::spng_static)
     set(NEOTPC_SPNG_TARGET spng::spng_static)
+elseif(TARGET PkgConfig::NEOTPC_SPNG)
+    set(NEOTPC_SPNG_TARGET PkgConfig::NEOTPC_SPNG)
 else()
     message(FATAL_ERROR
         "libspng was found, but its package exported neither spng::spng "
@@ -71,16 +82,15 @@ endif()
 
 add_library(neotpc_texture
     src/texture/BatchConverter.cpp
-    src/texture/FileUtil.cpp
     src/texture/Image.cpp
     src/texture/InternalImageCodecs.cpp
     src/texture/JpegCodec.cpp
-    src/texture/Txi.cpp
 )
+add_library(neotpc::texture ALIAS neotpc_texture)
 target_include_directories(neotpc_texture
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
-target_link_libraries(neotpc_texture PRIVATE
+target_link_libraries(neotpc_texture PUBLIC neoshared::texture PRIVATE
     ${NEOTPC_SPNG_TARGET}
     JPEG::JPEG
 )
@@ -115,7 +125,7 @@ function(neotpc_link_wx target_name)
     target_compile_definitions(${target_name} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
     set(_wx_targets)
     if(TARGET wx::core)
-        set(_neotpc_wx_link_targets wx::core wx::base wx::adv)
+        set(_neotpc_wx_link_targets wx::core wx::base wx::adv wx::aui)
         if(NOT EMSCRIPTEN)
             list(APPEND _neotpc_wx_link_targets wx::stc)
         endif()
@@ -141,7 +151,7 @@ function(neotpc_link_wx target_name)
 endfunction()
 
 if(NEOTPC_BUILD_WX_GUI)
-    set(NEOTPC_WX_COMPONENTS core base adv)
+    set(NEOTPC_WX_COMPONENTS core base adv aui)
     if(NOT EMSCRIPTEN)
         list(APPEND NEOTPC_WX_COMPONENTS stc)
     endif()

@@ -103,13 +103,21 @@ TxiEditor::TxiEditor(wxWindow* parent, wxWindowID id)
     Bind(wxEVT_KEY_DOWN, &TxiEditor::onKeyDown, this);
 }
 
-void TxiEditor::setValue(const wxString& value) {
+void TxiEditor::setValue(const wxString& value, bool preserveView) {
+    if (preserveView && value == GetValue()) return;
+    long begin = 0, end = 0;
+    GetSelection(&begin, &end);
+    const int vertical = GetScrollPos(wxVERTICAL), horizontal = GetScrollPos(wxHORIZONTAL);
     applyingCompletion_ = true;
     ChangeValue(value);
-    SetInsertionPoint(0);
+    if (preserveView) {
+        const long length = GetLastPosition();
+        SetSelection(std::clamp(begin, 0L, length), std::clamp(end, 0L, length));
+        SetScrollPos(wxVERTICAL, vertical); SetScrollPos(wxHORIZONTAL, horizontal);
+    } else SetInsertionPoint(0);
     applyingCompletion_ = false;
     clearPendingCompletion();
-    updateCompletion(false);
+    updateHintForCaret();
 }
 
 wxString TxiEditor::value() const {
@@ -192,7 +200,10 @@ TxiEditor::TxiEditor(wxWindow* parent, wxWindowID id)
     Bind(wxEVT_STC_UPDATEUI, &TxiEditor::onUpdateUi, this);
 }
 
-void TxiEditor::setValue(const wxString& value) {
+void TxiEditor::setValue(const wxString& value, bool preserveView) {
+    if (preserveView && value == GetText()) return;
+    const int caret = GetCurrentPos(), anchor = GetAnchor();
+    const int firstLine = GetFirstVisibleLine(), horizontal = GetXOffset();
     if (AutoCompActive()) AutoCompCancel();
 #if wxCHECK_VERSION(3, 3, 0)
     EOLAnnotationClearAll();
@@ -201,14 +212,19 @@ void TxiEditor::setValue(const wxString& value) {
 #endif
     applyingCompletion_ = true;
     SetText(value);
-    EmptyUndoBuffer();
+    EmptyUndoBuffer(); // Document history, not Scintilla, owns Undo/Redo.
     SetSavePoint();
-    GotoPos(0);
+    if (preserveView) {
+        const int length = GetTextLength();
+        SetSelection(std::clamp(anchor, 0, length), std::clamp(caret, 0, length));
+        SetFirstVisibleLine(std::clamp(firstLine, 0, std::max(0, GetLineCount() - 1)));
+        SetXOffset(horizontal);
+    } else GotoPos(0);
     applyingCompletion_ = false;
     clearPendingCompletion();
     lastCaretPosition_ = -1;
     updateLineNumberMargin();
-    updateCompletion(false);
+    updateHintForCaret();
 }
 
 wxString TxiEditor::value() const {

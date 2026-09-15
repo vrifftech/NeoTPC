@@ -9,6 +9,7 @@
 #include <chrono>
 #include <functional>
 #include <mutex>
+#include <memory>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -34,15 +35,22 @@ template<class F>
 auto runTextureTask(wxWindow* owner, const wxString& title, F&& work)
     -> std::invoke_result_t<F, TextureTaskProgress&> {
     TextureTaskProgress state;
-    wxProgressDialog progress(title, "Working...", 100, owner,
-        wxPD_APP_MODAL|wxPD_CAN_ABORT|wxPD_ELAPSED_TIME|wxPD_AUTO_HIDE);
+    std::unique_ptr<wxProgressDialog> progress;
+    const auto started = std::chrono::steady_clock::now();
+    auto ensureProgress = [&] {
+        if (!progress && std::chrono::steady_clock::now() - started >= std::chrono::milliseconds(180))
+            progress = std::make_unique<wxProgressDialog>(title, "Working...", 100, owner,
+                wxPD_APP_MODAL|wxPD_CAN_ABORT|wxPD_ELAPSED_TIME|wxPD_AUTO_HIDE);
+    };
     auto update=[&] {
+        ensureProgress();
+        if (!progress) return;
         std::string label; std::size_t done=0,total=0;
         { std::lock_guard<std::mutex> lock(state.mutex); label=state.label; done=state.complete; total=state.total; }
         const auto message=label.empty()?title:wxui::toWx(label);
         // Never announce completion while the final encoder/commit is running.
-        const bool keep=total ? progress.Update(static_cast<int>(std::min<std::size_t>(99,100*done/total)),message)
-                              : progress.Pulse(message);
+        const bool keep=total ? progress->Update(static_cast<int>(std::min<std::size_t>(99,100*done/total)),message)
+                              : progress->Pulse(message);
         if(!keep) state.cancelled.store(true);
     };
 #ifndef __EMSCRIPTEN__
@@ -52,9 +60,9 @@ auto runTextureTask(wxWindow* owner, const wxString& title, F&& work)
     });
     while(future.wait_for(std::chrono::milliseconds(25))!=std::future_status::ready) update();
     if constexpr(std::is_void_v<std::invoke_result_t<F,TextureTaskProgress&>>) {
-        future.get(); progress.Update(100,"Finished");
+        future.get(); if (progress) progress->Update(100,"Finished");
     } else {
-        auto result=future.get(); progress.Update(100,"Finished"); return result;
+        auto result=future.get(); if (progress) progress->Update(100,"Finished"); return result;
     }
 #else
     // Asyncify/cooperative path: no pthread requirement and no worker touching wx.
@@ -66,9 +74,9 @@ auto runTextureTask(wxWindow* owner, const wxString& title, F&& work)
         if(state.cancelled.load()) throw texture::OperationCancelled();
     });
     if constexpr(std::is_void_v<std::invoke_result_t<F,TextureTaskProgress&>>) {
-        std::invoke(work,state); progress.Update(100,"Finished");
+        std::invoke(work,state); if (progress) progress->Update(100,"Finished");
     } else {
-        auto result=std::invoke(work,state); progress.Update(100,"Finished"); return result;
+        auto result=std::invoke(work,state); if (progress) progress->Update(100,"Finished"); return result;
     }
 #endif
 }

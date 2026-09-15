@@ -1,12 +1,8 @@
 #pragma once
 
-#include <stdexcept>
+#include <neoshared/texture/Error.hpp>
 
 namespace neotpc::texture {
-
-class TextureError : public std::runtime_error {
-public:
-    using std::runtime_error::runtime_error;
-};
+using neoshared::texture::TextureError;
 
 } // namespace neotpc::texture

@@ -12,6 +12,7 @@
 #include "texture/ParserLimits.hpp"
 #include "texture/Txi.hpp"
 #include "NeoWxUi.hpp"
+#include "NeoViewState.hpp"
 #include "NeoGameDirectoryMenu.hpp"
 
 #include <wx/aboutdlg.h>
@@ -19,6 +20,8 @@
 #include <wx/choice.h>
 #include <wx/choicdlg.h>
 #include <wx/checkbox.h>
+#include <wx/collpane.h>
+#include <wx/spinctrl.h>
 #include <wx/dnd.h>
 #include <wx/filedlg.h>
 #include <wx/filename.h>
@@ -48,6 +51,7 @@
 #endif
 #include <iterator>
 #include <limits>
+#include <list>
 #include <memory>
 #include <optional>
 #include <string>
@@ -101,7 +105,8 @@ enum : int {
     ID_PLAY,
     ID_ANIMATION_TIMER,
     ID_ENCODE_PREVIEW, ID_EXPORT_IMAGE, ID_APPLY_ENCODING, ID_COMMON_TXI,
-    ID_PREVIOUS_FRAME, ID_NEXT_FRAME,
+    ID_PREVIOUS_FRAME, ID_NEXT_FRAME, ID_COMPARE_IMAGES, ID_CHOOSE_EXPORT,
+    ID_FONT_INCREASE, ID_FONT_DECREASE, ID_FONT_RESET,
 };
 
 const char* openWildcard() {
@@ -172,6 +177,20 @@ std::uint64_t decodedTextureBytes(const neotpc::texture::TextureData& texture) {
     }
     return total;
 }
+
+struct DisplayKey {
+    const texture::TextureLayer* layer = nullptr;
+    std::uint64_t pixels = 0;
+    int mode = 0;
+    bool operator==(const DisplayKey& rhs) const {
+        return layer == rhs.layer && pixels == rhs.pixels && mode == rhs.mode;
+    }
+};
+struct DisplayImage {
+    DisplayKey key;
+    wxImage image;
+    std::size_t bytes = 0;
+};
 
 struct ComparisonImage {
     fs::path path;
@@ -326,6 +345,9 @@ public:
         applyTxiHintTheme();
         canvas_->setDarkMode(darkMode_);
         refreshCatalog();
+        fontScale_ = settings_.fontScale();
+        applyUiScale();
+        Bind(wxEVT_DPI_CHANGED, [this](wxDPIChangedEvent& e) { CallAfter([this] { applyUiScale(); }); e.Skip(); });
         updateWindowState();
         wxui::setStatusText(*this, "Ready - open or drop a texture", 0);
     }
@@ -350,7 +372,9 @@ public:
             document_=std::move(opened); staged_.reset();
             comparisonImages_.clear();
             rebuildComparisonWorkspace();
-            refreshDocumentUi();
+            exportPreferences_.clear();
+            refreshDocumentUi(true);
+            applyToPreviewCanvases([](auto& c) { c.fitImage(); });
             settings_.addRecentFile(path);
             refreshRecentFiles();
             wxui::setStatusText(*this, wxString("Opened ") + wxpath::toWx(path), 0);
@@ -373,7 +397,7 @@ public:
                 if(names.size()!=1) {
                     wxMessageBox("Drop one folder for batch conversion, or only image files for comparison.","Choose one operation",wxOK|wxICON_INFORMATION,this);return false;
                 }
-                BatchDialog dialog(this,name,darkMode_);dialog.ShowModal();return true;
+                showBatchAt(name); return true;
             }
             files.push_back(path);
         }
@@ -413,7 +437,8 @@ private:
         file->Append(wxID_OPEN, "&Open...\tCtrl+O");
         recentFilesMenu_ = new wxMenu();
         file->AppendSubMenu(recentFilesMenu_, "Open &Recent");
-        file->Append(ID_OPEN_CONFLICTS, "Open &Conflicting Images\tCtrl+Shift+O");
+        file->Append(ID_COMPARE_IMAGES, "&Compare images...\tCtrl+Shift+O");
+        file->Append(ID_OPEN_CONFLICTS, "Find same-name variants");
         file->Append(ID_CLOSE_CONFLICTS, "Close Image Comparison");
         file->Append(wxID_SAVE, "&Save\tCtrl+S");
         file->Append(ID_SAVE_AS, "Save &As (preserve format)...\tCtrl+Shift+S");
@@ -438,6 +463,8 @@ private:
         auto* edit=new wxMenu();
         edit->Append(wxID_UNDO,"Undo texture change\tCtrl+Z");
         edit->Append(wxID_REDO,"Redo texture change\tCtrl+Y");
+        edit->AppendSeparator();
+        edit->Append(ID_APPLY_ENCODING,"Change current file encoding...");
         menuBar->Append(edit,"&Edit");
 
         auto* view = new wxMenu();
@@ -445,6 +472,10 @@ private:
         view->Append(ID_ACTUAL_SIZE, "&Actual Pixels (100%)\tCtrl+1");
         view->Append(ID_ZOOM_IN, "Zoom &In\tCtrl++");
         view->Append(ID_ZOOM_OUT, "Zoom &Out\tCtrl+-");
+        view->AppendSeparator();
+        view->Append(ID_FONT_INCREASE, "Increase UI font size\tCtrl+Shift+]");
+        view->Append(ID_FONT_DECREASE, "Decrease UI font size\tCtrl+Shift+[");
+        view->Append(ID_FONT_RESET, "Reset UI font size\tCtrl+Shift+0");
         view->AppendSeparator();
         view->AppendCheckItem(ID_DARK_MODE, "&Dark Mode")->Check(darkMode_);
         menuBar->Append(view, "&View");
@@ -466,6 +497,8 @@ private:
         auto* toolbar = CreateToolBar(wxTB_FLAT | wxTB_HORIZONTAL | wxTB_NODIVIDER);
         toolbar->AddTool(wxID_OPEN, "Open", wxArtProvider::GetBitmap(wxART_FILE_OPEN, wxART_TOOLBAR));
         toolbar->AddTool(wxID_SAVE, "Save", wxArtProvider::GetBitmap(wxART_FILE_SAVE, wxART_TOOLBAR));
+        toolbar->AddTool(ID_EXPORT_IMAGE, "Export", wxArtProvider::GetBitmap(wxART_FILE_SAVE_AS, wxART_TOOLBAR));
+        toolbar->AddTool(ID_BATCH_CONVERT, "Batch", wxArtProvider::GetBitmap(wxART_FOLDER, wxART_TOOLBAR));
         toolbar->AddSeparator();
         toolbar->AddTool(ID_FIT_IMAGE, "Fit", wxArtProvider::GetBitmap(wxART_FIND, wxART_TOOLBAR));
         toolbar->Realize();
@@ -482,6 +515,11 @@ private:
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { exportTxi(); }, ID_EXPORT_TXI);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { showBatch(); }, ID_BATCH_CONVERT);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { openConflictingImages(); }, ID_OPEN_CONFLICTS);
+        Bind(wxEVT_MENU, [this](wxCommandEvent&) { compareImages(); }, ID_COMPARE_IMAGES);
+        Bind(wxEVT_MENU, [this](wxCommandEvent&) { applyEncoding(); }, ID_APPLY_ENCODING);
+        Bind(wxEVT_MENU, [this](wxCommandEvent&) { changeUiScale(1); }, ID_FONT_INCREASE);
+        Bind(wxEVT_MENU, [this](wxCommandEvent&) { changeUiScale(-1); }, ID_FONT_DECREASE);
+        Bind(wxEVT_MENU, [this](wxCommandEvent&) { fontScale_=1.0; settings_.setFontScale(fontScale_); applyUiScale(); }, ID_FONT_RESET);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { closeImageComparison(); }, ID_CLOSE_CONFLICTS);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { closeTexture(); }, ID_CLOSE_TEXTURE);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { Close(); }, wxID_EXIT);
@@ -503,6 +541,8 @@ private:
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { showAbout(); }, wxID_ABOUT);
         Bind(wxEVT_TOOL, [this](wxCommandEvent&) { chooseOpen(); }, wxID_OPEN);
         Bind(wxEVT_TOOL, [this](wxCommandEvent&) { save(); }, wxID_SAVE);
+        Bind(wxEVT_TOOL, [this](wxCommandEvent&) { exportImage(); }, ID_EXPORT_IMAGE);
+        Bind(wxEVT_TOOL, [this](wxCommandEvent&) { showBatch(); }, ID_BATCH_CONVERT);
         Bind(wxEVT_TOOL, [this](wxCommandEvent&) { applyToPreviewCanvases([](auto& canvas) { canvas.fitImage(); }); refreshStatus(); }, ID_FIT_IMAGE);
         refreshRecentFiles();
     }
@@ -529,12 +569,12 @@ private:
         previewHostSizer_ = new wxBoxSizer(wxVERTICAL);
         previewHost_->SetSizer(previewHostSizer_);
         notebook_ = new wxNotebook(splitter, wxID_ANY);
-        notebook_->SetMinSize(FromDIP(wxSize(390, 400)));
+        notebook_->SetMinSize(FromDIP(wxSize(330, 300)));
         buildTexturePage();
         buildTxiPage();
         buildCatalogPage();
         rebuildComparisonWorkspace();
-        splitter->SplitVertically(previewHost_, notebook_, -FromDIP(430));
+        splitter->SplitVertically(previewHost_, notebook_, -FromDIP(380));
         root->Add(splitter, 1, wxEXPAND);
         SetSizer(root);
 
@@ -641,6 +681,8 @@ private:
     }
 
     void rebuildComparisonWorkspace() {
+        clearDisplayCache();
+        refreshExportSummary();
         if (previewHostSizer_ == nullptr) return;
         const auto retainedView=canvas_ ? canvas_->view() : TextureCanvas::View{};
         canvas_ = nullptr;
@@ -702,14 +744,21 @@ private:
         samplingChoice_->Bind(wxEVT_CHOICE,[this](wxCommandEvent&){applyToPreviewCanvases([this](auto& c){c.setSmooth(samplingChoice_->GetSelection()==1);});});
         gridChoice_->Bind(wxEVT_CHOICE,[this](wxCommandEvent&){applyToPreviewCanvases([this](auto& c){c.setGrid(static_cast<TextureCanvas::Grid>(gridChoice_->GetSelection()));});});
         previewBox->Add(previewGrid, 1, wxEXPAND | wxALL, FromDIP(8));
-        conflictButton_ = new wxButton(page, ID_OPEN_CONFLICTS, "Open conflicting images");
-        conflictButton_->SetToolTip("Find same-folder texture files whose base name differs only by case, numbered duplicate suffixes, copy suffixes, or image extension.");
+        conflictButton_ = new wxButton(page, ID_COMPARE_IMAGES, "Compare images...");
+        conflictButton_->SetToolTip("Choose images to compare. File > Find same-name variants searches the current directory instead.");
         previewBox->Add(conflictButton_, 0, wxALIGN_RIGHT | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(8));
         root->Add(previewBox, 0, wxEXPAND | wxALL, FromDIP(8));
 
-        summary_ = new wxTextCtrl(page, wxID_ANY, wxEmptyString, wxDefaultPosition, FromDIP(wxSize(-1, 205)),
+        imageInfo_ = new wxStaticText(page, wxID_ANY, "Open a texture to view its dimensions and format.");
+        imageInfo_->Wrap(FromDIP(330));
+        root->Insert(0, imageInfo_, 0, wxEXPAND | wxALL, FromDIP(8));
+        auto* details = new wxCollapsiblePane(page, wxID_ANY, "Image details", wxDefaultPosition, wxDefaultSize, wxCP_DEFAULT_STYLE | wxCP_NO_TLW_RESIZE);
+        auto* detailSizer = new wxBoxSizer(wxVERTICAL);
+        summary_ = new wxTextCtrl(details->GetPane(), wxID_ANY, wxEmptyString, wxDefaultPosition, FromDIP(wxSize(-1, 140)),
                                   wxTE_MULTILINE | wxTE_READONLY | wxTE_DONTWRAP);
-        root->Add(summary_, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(8));
+        detailSizer->Add(summary_, 1, wxEXPAND); details->GetPane()->SetSizer(detailSizer);
+        root->Add(details, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(8));
+        details->Bind(wxEVT_COLLAPSIBLEPANE_CHANGED, [page](wxCollapsiblePaneEvent&) { page->Layout(); page->FitInside(); });
 
         auto* outputRow=new wxBoxSizer(wxHORIZONTAL);
         outputRow->Add(new wxStaticText(page,wxID_ANY,"Export format"),0,wxALIGN_CENTER_VERTICAL|wxRIGHT,FromDIP(8));
@@ -717,17 +766,24 @@ private:
         for(const char* value:{"tpc","tga","dds","png","jpg","bmp","txi"})outputFormat_->Append(value);
         outputFormat_->SetSelection(0);outputRow->Add(outputFormat_,1,wxEXPAND);
         root->Add(outputRow,0,wxEXPAND|wxLEFT|wxRIGHT|wxBOTTOM,FromDIP(8));
-        outputFormat_->Bind(wxEVT_CHOICE,[this](wxCommandEvent&){onOptionsChanged();});
+        outputFormat_->Bind(wxEVT_CHOICE,[this](wxCommandEvent&){changeExportFormat();});
         optionsPanel_ = new EncodingOptionsPanel(page);
         root->Add(optionsPanel_, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(8));
 
+        auto* destinationRow = new wxBoxSizer(wxHORIZONTAL);
+        exportPath_ = new wxTextCtrl(page, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxTE_READONLY);
+        exportPath_->SetName("Export destination");
+        destinationRow->Add(exportPath_, 1, wxEXPAND | wxRIGHT, FromDIP(5));
+        destinationRow->Add(new wxButton(page, ID_CHOOSE_EXPORT, "Destination..."), 0);
+        root->Add(destinationRow, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(8));
+        Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { chooseExportDestination(); }, ID_CHOOSE_EXPORT);
         auto* exportButtons=new wxBoxSizer(wxHORIZONTAL);
         exportButtons->Add(new wxButton(page,ID_ENCODE_PREVIEW,"Preview encoded output"),1,wxRIGHT,FromDIP(5));
         exportButtons->Add(new wxButton(page,ID_EXPORT_IMAGE,"Export..."),0);
         root->Add(exportButtons,0,wxEXPAND|wxLEFT|wxRIGHT|wxBOTTOM,FromDIP(8));
         encodingSummary_=new wxStaticText(page,wxID_ANY,"Export settings do not change the open document until applied.");
         encodingSummary_->Wrap(FromDIP(380));root->Add(encodingSummary_,0,wxEXPAND|wxLEFT|wxRIGHT|wxBOTTOM,FromDIP(8));
-        root->Add(new wxButton(page,ID_APPLY_ENCODING,"Apply settings to this document..."),0,wxLEFT|wxRIGHT|wxBOTTOM,FromDIP(8));
+
         Bind(wxEVT_BUTTON,[this](wxCommandEvent&){buildEncodedPreview();},ID_ENCODE_PREVIEW);
         Bind(wxEVT_BUTTON,[this](wxCommandEvent&){exportImage();},ID_EXPORT_IMAGE);
         Bind(wxEVT_BUTTON,[this](wxCommandEvent&){applyEncoding();},ID_APPLY_ENCODING);
@@ -753,7 +809,7 @@ private:
         Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { invertAlpha(); }, ID_INVERT_ALPHA);
         Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { flipHorizontal(); }, ID_FLIP_HORIZONTAL);
         Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { flipVertical(); }, ID_FLIP_VERTICAL);
-        Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { openConflictingImages(); }, ID_OPEN_CONFLICTS);
+        Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { compareImages(); }, ID_COMPARE_IMAGES);
     }
 
     void applyTxiHintTheme() {
@@ -874,28 +930,86 @@ private:
         try {
             setAnimationPlaying(false);TextureBusyGuard busy(busy_);
             runTextureTask(this,"Save copy",[&](TextureTaskProgress&){document_.saveAs(output);});
-            staged_.reset();comparisonImages_.clear();rebuildComparisonWorkspace();refreshDocumentUi();
+            staged_.reset();comparisonImages_.clear();resetExportDestination();rebuildComparisonWorkspace();refreshDocumentUi();
             settings_.addRecentFile(output);refreshRecentFiles();return true;
         } catch(const texture::OperationCancelled&) {wxui::setStatusText(*this,"Save As cancelled",0);return false;}
           catch(const std::exception& error){wxui::showError(this,error);return false;}
     }
 
     fs::path proposedOutput() const {
-        auto output=document_.path();output.replace_extension("."+wxui::toStd(outputFormat_->GetStringSelection()));return output;
+        const auto extension = wxui::toStd(outputFormat_->GetStringSelection());
+        auto name = document_.path().filename(); name.replace_extension("." + extension);
+        fs::path output = exportDestination_;
+        if (output.empty()) output = document_.path().parent_path() / "exports" / name;
+        // Keep a deliberately selected valid alias such as .jpeg or .jpe.
+        if (!exportDestinationChosen_ || texture::kindForExtension(output) != texture::kindForExtension(fs::path("output." + extension)))
+            output.replace_extension("." + extension);
+        return output;
+    }
+    void resetExportDestination() {
+        auto folder = document_.path().parent_path() / "exports";
+#ifndef __EMSCRIPTEN__
+        if (const auto remembered = settings_.readPath("Export/Directory")) folder = *remembered;
+#endif
+        exportDestination_ = folder / document_.path().filename();
+        exportDestinationChosen_ = false;
+    }
+    bool chooseExportDestination() {
+        if (busy_ || !document_.isOpen()) return false;
+        const auto suggested=proposedOutput(); const auto ext=texture::extensionLower(suggested);
+        wxFileDialog dialog(this,"Export destination",wxpath::toWx(suggested.parent_path()),wxpath::toWx(suggested.filename()),
+            wxui::toWx("Output (*."+ext+")|*."+ext),wxFD_SAVE);
+        if(dialog.ShowModal()!=wxID_OK)return false;
+        auto path=wxpath::fromWx(dialog.GetPath()); if(path.extension().empty())path.replace_extension("."+ext);
+        if(texture::kindForExtension(path)!=texture::kindForExtension(suggested)) {
+            wxMessageBox("Choose the output format first, then use its extension.","Export format",wxOK|wxICON_INFORMATION,this);return false;
+        }
+        try { document_.validateExportDestination(path); }
+        catch(const std::exception& e) { wxui::showError(this,e);return false; }
+        exportDestination_=path;exportDestinationChosen_=true;
+        updateExportTarget(); refreshExportSummary();return true;
+    }
+    void changeExportFormat() {
+        if (loading_ || busy_ || !document_.isOpen()) return;
+        exportPreferences_[activeExportFormat_] = optionsPanel_->options();
+        activeExportFormat_ = wxui::toStd(outputFormat_->GetStringSelection());
+        exportDestinationChosen_ = false;
+        updateExportTarget();
+        const auto found=exportPreferences_.find(activeExportFormat_);
+        optionsPanel_->setOptions(found==exportPreferences_.end()?document_.saveOptions():found->second);
+        exportDestinationChosen_=false;onOptionsChanged();
     }
     void updateExportTarget() {
         if(!document_.isOpen())return;
         optionsPanel_->setTarget(texture::kindForExtension(proposedOutput()),document_.texture().ddsDialect,document_.texture().sourceMipMapCount>1);
+        if(exportPath_) exportPath_->ChangeValue(wxpath::toWx(proposedOutput()));
+    }
+    void refreshExportSummary() {
+        if (!encodingSummary_) return;
+        if (!document_.isOpen()) {
+            if (exportPath_) exportPath_->ChangeValue(wxString{});
+            encodingSummary_->SetLabel("Open a texture to choose an output.");
+            return;
+        }
+        const auto text = document_.exportSummary(proposedOutput(), optionsPanel_->options(), staged_.get());
+        encodingSummary_->SetLabel(wxui::toWx(text)); encodingSummary_->Wrap(FromDIP(330));
+        encodingSummary_->GetParent()->Layout();
+        if (auto* scroll = wxDynamicCast(encodingSummary_->GetParent(), wxScrolledWindow)) scroll->FitInside();
     }
     void discardEncodedPreview() {
         staged_.reset();
         const auto old=comparisonImages_.size();
         comparisonImages_.erase(std::remove_if(comparisonImages_.begin(),comparisonImages_.end(),[](const auto& image){return image.encodedPreview;}),comparisonImages_.end());
-        if(comparisonImages_.size()!=old){rebuildComparisonWorkspace();refreshMipmapChoices();refreshPreview();}
-        if(encodingSummary_)encodingSummary_->SetLabel("Settings are for Export. Preview again after changing pixels, TXI or settings.");
+        if(comparisonImages_.size()!=old){
+            const bool playing=animationTimer_.IsRunning();
+            rebuildComparisonWorkspace();refreshLayerChoices();refreshMipmapChoices();setAnimationPlaying(playing);refreshPreview();
+        }
+        refreshExportSummary();
     }
     bool buildEncodedPreview() {
         if(busy_ || !document_.isOpen())return false;
+        const auto issue=document_.outputIssue(proposedOutput(),optionsPanel_->options());
+        if(!issue.empty()){refreshExportSummary();wxMessageBox(wxui::toWx(issue),"Choose compatible settings",wxOK|wxICON_INFORMATION,this);return false;}
         try {
             setAnimationPlaying(false);TextureBusyGuard busy(busy_);
             const auto output=proposedOutput();const auto options=optionsPanel_->options();
@@ -903,41 +1017,38 @@ private:
             discardEncodedPreview();staged_=std::make_unique<TexturePreview>(std::move(result));
             comparisonImages_.push_back(ComparisonImage{output,{},nullptr,nullptr,true});
             rebuildComparisonWorkspace();refreshMipmapChoices();refreshPreview();
-            std::string info=texture::textureSummary(staged_->decoded)+"\nEncoded image: "+std::to_string(staged_->encoded.image.size())+" bytes";
-            if(staged_->encoded.sidecar)info+="; TXI: "+std::to_string(staged_->encoded.sidecar->size())+" bytes";
-            info+=staged_->pixelsPreserved ? "\nOriginal pixel representation preserved." : "\nRe-encoded output; compare pixels before exporting.";
-            encodingSummary_->SetLabel(wxui::toWx(info));encodingSummary_->Wrap(FromDIP(380));encodingSummary_->GetParent()->Layout();
-            if(auto* scroll=wxDynamicCast(encodingSummary_->GetParent(),wxScrolledWindow))scroll->FitInside();
+            refreshExportSummary();
             updateWindowState();return true;
         } catch(const texture::OperationCancelled&) {wxui::setStatusText(*this,"Encoded preview cancelled; no output written",0);return false;}
           catch(const std::exception& error){discardEncodedPreview();encodingSummary_->SetLabel(wxui::toWx(error.what()));encodingSummary_->Wrap(FromDIP(380));wxui::showError(this,error);return false;}
     }
     void exportImage() {
         if(busy_ || !document_.isOpen())return;
-        if(!staged_ && !buildEncodedPreview())return;
-        const auto suggested=proposedOutput();const auto ext=texture::extensionLower(suggested);
-        wxFileDialog dialog(this,"Export encoded result (keeps document open)",wxpath::toWx(suggested.parent_path()),wxpath::toWx(suggested.filename()),
-            wxui::toWx("Encoded output (*."+ext+")|*."+ext),wxFD_SAVE|wxFD_OVERWRITE_PROMPT);
-        if(dialog.ShowModal()!=wxID_OK)return;
-        auto output=wxpath::fromWx(dialog.GetPath());if(output.extension().empty())output+="."+ext;
-        if(texture::kindForExtension(output)!=staged_->outputKind){wxMessageBox("Select the output format before previewing, then export with that extension.","Output format changed",wxOK|wxICON_INFORMATION,this);return;}
-        if(texture::canonicalPathKey(output)==texture::canonicalPathKey(document_.path())) {
-            wxMessageBox("Choose a different output name. To deliberately re-encode the open file, use Apply settings to this document, then Save. Undo is retained.","Protect open document",wxOK|wxICON_INFORMATION,this);return;
-        }
+        // Choose and validate ALL destinations before spending time encoding.
+        if(!exportDestinationChosen_ && !chooseExportDestination())return;
+        const auto output=proposedOutput();
+        try { document_.validateExportDestination(output); }
+        catch(const std::exception& e){wxui::showError(this,e);return;}
+        std::error_code ec;
+        if(fs::exists(output,ec) && !wxui::confirm(this,"Replace exported image?",wxpath::toWx(output)))return;
         if(!confirmSidecarReplacement(output))return;
-        if(staged_->outputKind==texture::TextureFileKind::Jpeg && document_.texture().hasAlpha &&
-            !wxui::confirm(this,"JPEG discards alpha","The encoded preview has no transparency. Export it?"))return;
+        if(texture::kindForExtension(output)==texture::TextureFileKind::Jpeg && document_.texture().hasAlpha &&
+            !wxui::confirm(this,"JPEG discards alpha","Export this image without transparency?"))return;
+        if(!staged_ && !buildEncodedPreview())return;
         try {
             setAnimationPlaying(false);TextureBusyGuard busy(busy_);
             runTextureTask(this,"Write encoded output",[&](TextureTaskProgress&){document_.commitPreview(output,*staged_,false);});
+#ifndef __EMSCRIPTEN__
+            settings_.writePath("Export/Directory",output.parent_path());
+#endif
             wxui::setStatusText(*this,wxString("Exported exactly the previewed bytes: ")+wxpath::toWx(output),0);
         } catch(const texture::OperationCancelled&){wxui::setStatusText(*this,"Export cancelled",0);}
           catch(const std::exception& error){wxui::showError(this,error);}
     }
     void applyEncoding() {
         if(busy_ || !document_.isOpen())return;
-        if(texture::kindForExtension(proposedOutput())!=document_.texture().kind){wxMessageBox("Apply is only for this document's current format. Use Export for another format.","Apply encoding",wxOK|wxICON_INFORMATION,this);return;}
-        if(!wxui::confirm(this,"Apply encoding to this document?","These settings may recompress pixels on the next Save. This change can be undone. Nothing is written now."))return;
+        if(texture::kindForExtension(proposedOutput())!=document_.texture().kind){wxMessageBox("Choose this document's current format in Export settings first. Use Export for another format.","Change current encoding",wxOK|wxICON_INFORMATION,this);return;}
+        if(!wxui::confirm(this,"Change current file encoding?","These settings may recompress pixels on the next Save. This change can be undone. Nothing is written now."))return;
         document_.finishEditGroup();document_.setSaveOptions(optionsPanel_->options());document_.finishEditGroup();discardEncodedPreview();afterPixelChange();
     }
     void undoRedo(bool redo) {
@@ -953,16 +1064,78 @@ private:
         } catch(const std::exception& error){wxui::showError(this,error);}
     }
     void editCommonTxi() {
-        if(busy_ || !document_.isOpen())return;
-        const wxString choices[]={"Animation columns (numx)","Animation rows (numy)","Animation FPS (fps)","Animation type (proceduretype)","Environment map (envmaptexture)","Bump map (bumpmaptexture)"};
-        const char* keys[]={"numx","numy","fps","proceduretype","envmaptexture","bumpmaptexture"};
-        wxSingleChoiceDialog choice(this,"Edits preserve all other directives. Layout changes remain pending until validated by the encoder.","Common TXI values",6,choices);
-        if(choice.ShowModal()!=wxID_OK)return;const auto key=std::string(keys[choice.GetSelection()]);std::string value;
-        for(const auto& entry:texture::parseTxiEntries(document_.texture().txi))if(entry.key==key)value=entry.value;
-        wxTextEntryDialog dialog(this,wxui::toWx(texture::txiDirectiveHint(key)),wxui::toWx(key),wxui::toWx(value));
-        if(dialog.ShowModal()!=wxID_OK)return;
-        document_.finishEditGroup();document_.setTxi(texture::setTxiValue(document_.texture().txi,key,wxui::toStd(dialog.GetValue())));document_.finishEditGroup();
-        loading_=true;txiEditor_->setValue(wxui::toWx(document_.texture().txi));loading_=false;discardEncodedPreview();afterPixelChange();refreshTxiValidation();
+        if (busy_ || !document_.isOpen()) return;
+        wxDialog dialog(this, wxID_ANY, "Common TXI values", wxDefaultPosition, wxDefaultSize,
+                        wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
+        auto* root = new wxBoxSizer(wxVERTICAL);
+        auto* help = new wxStaticText(&dialog, wxID_ANY,
+            "Blank removes that directive. Unchanged fields are left alone.\n"
+            "For duplicate fields, the last occurrence is displayed; editing or removing it resolves all its duplicates.\n"
+            "Other directives and comments are retained.");
+        help->Wrap(FromDIP(520)); root->Add(help, 0, wxEXPAND | wxALL, FromDIP(10));
+        const char* keys[] = {"proceduretype", "numx", "numy", "fps", "envmaptexture", "bumpmaptexture"};
+        const char* labels[] = {"Type", "Columns", "Rows", "Frames per second", "Environment map", "Bump map"};
+        std::string original[6]; wxTextCtrl* fields[6]{};
+        const auto entries = texture::parseTxiEntries(document_.texture().txi);
+        for (int group = 0; group < 2; ++group) {
+            auto* box = new wxStaticBoxSizer(wxVERTICAL, &dialog, group == 0 ? "Animation" : "Material references");
+            auto* grid = new wxFlexGridSizer(2, FromDIP(6), FromDIP(10)); grid->AddGrowableCol(1, 1);
+            for (int i = group == 0 ? 0 : 4; i < (group == 0 ? 4 : 6); ++i) {
+                original[i] = texture::getTxiValue(document_.texture().txi, keys[i]).value_or("");
+                fields[i] = new wxTextCtrl(&dialog, wxID_ANY, wxui::toWx(original[i])); fields[i]->SetName(labels[i]);
+                fields[i]->SetToolTip(wxui::toWx(texture::txiDirectiveHint(keys[i])));
+                const auto count = std::count_if(entries.begin(), entries.end(), [&](const auto& entry) {
+                    return !entry.blankOrComment && !entry.listData && entry.key == keys[i];
+                });
+                wxString label = wxui::toWx(labels[i]); if (count > 1) label += " (duplicates)";
+                grid->Add(new wxStaticText(&dialog, wxID_ANY, label), 0, wxALIGN_CENTER_VERTICAL);
+                grid->Add(fields[i], 1, wxEXPAND);
+            }
+            box->Add(grid, 1, wxEXPAND | wxALL, FromDIP(8)); root->Add(box, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(10));
+        }
+        auto* errorLabel = new wxStaticText(&dialog, wxID_ANY, wxEmptyString);
+        root->Add(errorLabel, 0, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(10));
+        root->Add(dialog.CreateSeparatedButtonSizer(wxOK | wxCANCEL), 0, wxEXPAND | wxALL, FromDIP(10));
+        dialog.SetSizerAndFit(root);
+        std::string candidate;
+        dialog.Bind(wxEVT_BUTTON, [&](wxCommandEvent&) {
+            int field = 0;
+            try {
+                candidate = document_.texture().txi;
+                for (; field < 6; ++field) {
+                    auto text = fields[field]->GetValue(); text.Trim(true).Trim(false);
+                    const auto value = wxui::toStd(text);
+                    if (value == original[field]) continue;
+                    if (value.empty()) { candidate = texture::removeTxiValue(candidate, keys[field]); continue; }
+                    if (field == 1 || field == 2) {
+                        unsigned long number = 0;
+                        if (!text.ToULong(&number) || number == 0 || number > 65535)
+                            throw texture::TextureError("Enter a positive integer (1–65535), or leave blank to remove.");
+                    }
+                    if (field == 3) {
+                        double fps = 0;
+                        if (!text.ToDouble(&fps) || !std::isfinite(fps) || fps <= 0)
+                            throw texture::TextureError("Enter a positive FPS, or leave blank to remove.");
+                    }
+                    candidate = texture::setTxiValue(candidate, keys[field], value);
+                }
+                dialog.EndModal(wxID_OK);
+            } catch (const std::exception& error) {
+                const int index = std::min(field, 5);
+                errorLabel->SetLabel(wxui::toWx(std::string(labels[index]) + ": " + error.what() + " No edits have been applied."));
+                errorLabel->Wrap(FromDIP(520)); dialog.Layout(); dialog.Fit();
+                fields[index]->SetFocus(); fields[index]->SelectAll();
+            }
+        }, wxID_OK);
+        wxui::applyTheme(&dialog, darkMode_); neoview::applyFontScale(&dialog, fontScale_); dialog.CentreOnParent();
+        if (dialog.ShowModal() != wxID_OK) return;
+        try {
+            document_.finishEditGroup(); document_.setTxi(std::move(candidate)); document_.finishEditGroup();
+            loading_ = true; txiEditor_->setValue(wxui::toWx(document_.texture().txi)); loading_ = false;
+            const bool playing = animationTimer_.IsRunning();
+            afterPixelChange(); refreshTxiValidation();
+            if (playing) setAnimationPlaying(true);
+        } catch (const std::exception& error) { loading_ = false; wxui::showError(this, error); }
     }
 
     void splitTpc() {
@@ -984,6 +1157,7 @@ private:
 #endif
         fs::path outputTxi;
         try {
+            document_.validateExportDestination(outputTga);
             outputTxi=texture::findTxiSidecar(outputTga).value_or(fs::path(outputTga).replace_extension(".txi"));
         } catch(const std::exception& error) {wxui::showError(this,error);return;}
 
@@ -997,6 +1171,7 @@ private:
         try {
             setAnimationPlaying(false);TextureBusyGuard busy(busy_);
             const auto pair = runTextureTask(this,"Split TPC",[&](TextureTaskProgress&){
+                document_.validateExportDestination(outputTga);
                 return texture::saveTgaTxiPair(document_.texture(), outputTga);
             });
             wxui::setStatusText(*this,
@@ -1047,6 +1222,9 @@ private:
         if (outputTpc.extension().empty()) outputTpc.replace_extension(".tpc");
 #endif
 
+        try { if (document_.isOpen()) document_.validateExportDestination(outputTpc); }
+        catch (const std::exception& error) { wxui::showError(this, error); return; }
+
         neotpc::texture::TextureSaveOptions initialOptions;
         if (document_.isOpen()) initialOptions = document_.saveOptions();
         TpcEncodingDialog optionsDialog(this, initialOptions);
@@ -1057,6 +1235,7 @@ private:
             setAnimationPlaying(false);TextureBusyGuard busy(busy_);
             const auto options=optionsDialog.options();
             runTextureTask(this,"Combine TGA and TXI",[&](TextureTaskProgress&){
+                if (document_.isOpen()) document_.validateExportDestination(outputTpc);
                 texture::combineTgaTxiToTpc(inputTga,inputTxi,outputTpc,options);
             });
             settings_.addRecentFile(outputTpc);
@@ -1078,7 +1257,9 @@ private:
             TextureBusyGuard busy(busy_);
             const auto imported=runTextureTask(this,"Import TXI",[&](TextureTaskProgress&){return texture::loadTexture(path);});
             document_.finishEditGroup(); document_.setTxi(imported.txi); document_.finishEditGroup();
+            const bool playing = animationTimer_.IsRunning();
             discardEncodedPreview();
+            if (playing) setAnimationPlaying(true);
             loading_ = true;
             txiEditor_->setValue(wxui::toWx(document_.texture().txi));
             loading_ = false;
@@ -1095,7 +1276,7 @@ private:
         if (busy_ || !document_.isOpen()) return;
         auto suggested = document_.path().filename();
         suggested.replace_extension(".txi");
-        wxFileDialog dialog(this, "Export TXI metadata", wxpath::toWx(document_.path().parent_path()),
+        wxFileDialog dialog(this, "Export TXI metadata", wxpath::toWx(proposedOutput().parent_path()),
                             wxpath::toWx(suggested), "TXI metadata (*.txi)|*.txi",
                             wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
         if (dialog.ShowModal() != wxID_OK) return;
@@ -1105,7 +1286,11 @@ private:
 #endif
         try {
             TextureBusyGuard busy(busy_);
-            runTextureTask(this,"Export TXI",[&](TextureTaskProgress&){texture::saveTexture(document_.texture(),output);});
+            runTextureTask(this,"Export TXI",[&](TextureTaskProgress&){
+                document_.validateExportDestination(output);
+                const auto encoded=document_.preview(output,document_.saveOptions());
+                document_.commitPreview(output,encoded,false);
+            });
             wxui::setStatusText(*this, wxString("Exported TXI to ") + wxpath::toWx(output), 0);
         } catch (const std::exception& error) {
             wxui::showError(this, error);
@@ -1130,17 +1315,93 @@ private:
         cancelBrowserComparisonLoad(false, true);
 #endif
         document_.close();staged_.reset();
+        exportDestination_.clear(); exportDestinationChosen_ = false; activeExportFormat_.clear();
         comparisonImages_.clear();
         rebuildComparisonWorkspace();
         refreshDocumentUi();
     }
 
     void showBatch() {
-        if(busy_)return;
-        setAnimationPlaying(false);
         const auto initial = document_.isOpen() ? wxpath::toWx(document_.path().parent_path()) : wxString{};
-        BatchDialog dialog(this, initial, darkMode_);
+        showBatchAt(initial);
+    }
+
+    void showBatchAt(const wxString& initial) {
+        if (busy_) return;
+        setAnimationPlaying(false);
+        TextureBusyGuard busy(busy_); // No edits/open/close while a modal batch owns its snapshot.
+        std::vector<fs::path> affectingOutputs, directOutputs;
+        BatchEditorHooks hooks;
+        hooks.prepare = [&](const texture::BatchPlan& plan) {
+            affectingOutputs.clear(); directOutputs.clear();
+            if (!document_.isOpen()) return std::string{};
+            const auto sourceMembers = texture::batchOutputMembers(document_.path());
+            for (const auto& row : plan.items) {
+                if (!texture::batchItemWritesOutput(row) || !document_.outputTouchesSource(row.output)) continue;
+                affectingOutputs.push_back(row.output);
+                const auto outputs = texture::batchOutputMembers(row.output);
+                if (std::any_of(outputs.begin(), outputs.end(), [&](const auto& output) {
+                    return std::any_of(sourceMembers.begin(), sourceMembers.end(), [&](const auto& source) {
+                        return texture::canonicalPathKey(output) == texture::canonicalPathKey(source);
+                    });
+                })) directOutputs.push_back(row.output);
+            }
+            if (affectingOutputs.empty()) return std::string{};
+            std::string note = "This batch updates the open texture or its TXI. The editor will refresh after a successful replacement.\n";
+            if (document_.dirty()) note += "Unsaved edits to that document will be replaced and its old Undo history cleared after a successful replacement.\n";
+            return note + "\n";
+        };
+        hooks.completed = [&](wxWindow* owner, const texture::BatchReport& report) {
+            const bool replaced = std::any_of(report.items.begin(), report.items.end(), [&](const auto& row) {
+                return row.status == texture::BatchItemStatus::Converted && row.wroteOutput &&
+                    std::find(affectingOutputs.begin(), affectingOutputs.end(), row.output) != affectingOutputs.end();
+            });
+            if (!replaced || !document_.isOpen()) return;
+            const auto view = canvas_->view();
+            const bool directReplacement = std::any_of(report.items.begin(), report.items.end(), [&](const auto& row) {
+                return row.status == texture::BatchItemStatus::Converted && row.wroteOutput &&
+                    std::find(directOutputs.begin(), directOutputs.end(), row.output) != directOutputs.end();
+            });
+            const bool refreshed = runTextureTask(owner, "Refresh open texture", [&](TextureTaskProgress&) {
+                // Real acknowledged replacement resets edits even if its bytes
+                // happen to match. A renamed hard-link alias may not have changed
+                // our source at all; don't discard edits in that case.
+                if (directReplacement) { const auto path = document_.path(); document_.open(path); return true; }
+                return document_.reloadIfSourceChanged();
+            });
+            if (!refreshed) return;
+            staged_.reset();
+            comparisonImages_.erase(std::remove_if(comparisonImages_.begin(), comparisonImages_.end(),
+                [](const auto& image) { return image.encodedPreview; }), comparisonImages_.end());
+            rebuildComparisonWorkspace();
+            refreshDocumentUi(); // Retains valid frame, mip, channel and export choices.
+            applyToPreviewCanvases([&](auto& canvas) { canvas.setView(view); });
+            wxui::setStatusText(*this, "Open texture refreshed from the completed batch output", 0);
+        };
+        BatchDialog dialog(this, initial, darkMode_, std::move(hooks));
         dialog.ShowModal();
+    }
+
+    void applyUiScale() {
+        neoview::applyFontScale(this,fontScale_);
+        txiEditor_->applyTheme(darkMode_);
+        applyTxiHintTheme();Layout();
+    }
+    void changeUiScale(int steps) {
+        fontScale_=neoview::steppedFontScale(fontScale_,steps);
+        settings_.setFontScale(fontScale_);applyUiScale();
+    }
+    void compareImages() {
+        if(busy_ || !document_.isOpen())return;
+#if defined(__EMSCRIPTEN__)
+        requestBrowserComparisonFiles();
+#else
+        wxFileDialog dialog(this,"Compare images",wxpath::toWx(document_.path().parent_path()),wxEmptyString,openWildcard(),wxFD_OPEN|wxFD_FILE_MUST_EXIST|wxFD_MULTIPLE);
+        if(dialog.ShowModal()!=wxID_OK)return;
+        wxArrayString selected;dialog.GetPaths(selected);std::vector<fs::path> paths;
+        for(const auto& path:selected)paths.push_back(wxpath::fromWx(path));
+        openConflictingImagesFromPaths(std::move(paths));
+#endif
     }
 
     void openConflictingImages() {
@@ -1149,8 +1410,7 @@ private:
 #if defined(__EMSCRIPTEN__)
         requestBrowserComparisonFiles();
 #else
-        openConflictingImagesFromPaths(
-            neotpc::texture::findConflictingTexturePaths(document_.path()));
+        openConflictingImagesFromPaths({}, true);
 #endif
     }
 
@@ -1554,13 +1814,14 @@ private:
         if (refreshState) updateWindowState();
     }
 #else
-    void openConflictingImagesFromPaths(std::vector<fs::path> paths) {
+    void openConflictingImagesFromPaths(std::vector<fs::path> paths, bool findVariants = false) {
         if(busy_ || !document_.isOpen()) return;
         struct Loaded {std::vector<ComparisonImage> images;std::vector<std::string> failures;bool cancelled=false;};
         try {
             setAnimationPlaying(false);TextureBusyGuard busy(busy_);
             const auto source=document_.path();
             auto result=runTextureTask(this,"Open comparisons",[&](TextureTaskProgress& progress){
+                if (findVariants) paths=texture::findConflictingTexturePaths(source);
                 Loaded loaded;std::uint64_t bytes=0;
                 constexpr std::uint64_t limit=UINT64_C(256)*1024*1024;
                 const auto count=std::min<std::size_t>(paths.size(),64);
@@ -1584,7 +1845,7 @@ private:
                 return loaded;
             });
             comparisonImages_=std::move(result.images);staged_.reset();
-            rebuildComparisonWorkspace();refreshMipmapChoices();refreshPreview();updateWindowState();Layout();
+            rebuildComparisonWorkspace();refreshMipmapChoices();refreshPreview();refreshExportSummary();updateWindowState();Layout();
             if(!result.failures.empty()) {
                 std::string details;
                 for(const auto& failure:result.failures)details+=failure+'\n';
@@ -1606,22 +1867,25 @@ private:
         if (wasLoading && comparisonImages_.empty()) return;
 #endif
         if (busy_ || comparisonImages_.empty()) return;
-        staged_.reset();comparisonImages_.clear();
-        rebuildComparisonWorkspace();
-        refreshPreview();
-        updateWindowState();
-        Layout();
-        wxui::setStatusText(*this, "Image comparison closed", 0);
+        const int oldLayer = layerChoice_->GetSelection(), oldMip = mipChoice_->GetSelection();
+        const bool playing = animationTimer_.IsRunning();
+        staged_.reset(); comparisonImages_.clear();
+        rebuildComparisonWorkspace(); refreshLayerChoices(); refreshMipmapChoices();
+        setAnimationPlaying(playing); refreshPreview(); refreshExportSummary(); updateWindowState(); Layout();
+        const bool changed = oldLayer != layerChoice_->GetSelection() || oldMip != mipChoice_->GetSelection();
+        wxui::setStatusText(*this, changed ? "Comparison closed — selected an available source frame/mip" : "Image comparison closed", 0);
     }
 
-    void refreshDocumentUi() {
+    void refreshDocumentUi(bool resetExport = false) {
         setAnimationPlaying(false);
+        const int retainedLayer=resetExport?0:std::max(0,layerChoice_->GetSelection());
+        const int retainedMip=resetExport?0:std::max(0,mipChoice_->GetSelection());
         loading_ = true;
         layerChoice_->Clear();
         mipChoice_->Clear();
         if (!document_.isOpen()) {
             summary_->ChangeValue(wxEmptyString);
-            txiEditor_->setValue(wxEmptyString);
+            txiEditor_->setValue(wxEmptyString, false);
             txiIssues_->DeleteAllItems();
             txiSummary_->SetLabel("No TXI metadata");
             txiHelp_->SetLabel(
@@ -1633,15 +1897,20 @@ private:
             playButton_->Show(false);
             mipChoice_->Enable(false);
             loading_ = false;
+            refreshExportSummary();
             updateWindowState();
             return;
         }
         const auto& texture = document_.texture();
         refreshLayerChoices();
+        if(layerChoice_->GetCount())layerChoice_->SetSelection(std::min(retainedLayer,static_cast<int>(layerChoice_->GetCount())-1));
         refreshMipmapChoices();
-        optionsPanel_->setOptions(document_.saveOptions());
-        auto extension=texture::extensionLower(document_.path());if(extension=="txb")extension="tpc";if(extension=="jpeg"||extension=="jpe")extension="jpg";
-        outputFormat_->SetStringSelection(wxui::toWx(extension));updateExportTarget();
+        if(mipChoice_->GetCount())mipChoice_->SetSelection(std::min(retainedMip,static_cast<int>(mipChoice_->GetCount())-1));
+        if (resetExport || activeExportFormat_.empty()) {
+            auto extension=texture::extensionLower(document_.path());if(extension=="txb")extension="tpc";if(extension=="jpeg"||extension=="jpe")extension="jpg";
+            outputFormat_->SetStringSelection(wxui::toWx(extension)); activeExportFormat_=extension;
+            resetExportDestination(); updateExportTarget(); optionsPanel_->setOptions(document_.saveOptions());
+        } else updateExportTarget();
         if (texture.kind == neotpc::texture::TextureFileKind::Tpc) {
             txiHelp_->SetLabel(
                 "This TXI is embedded in the TPC. Edit it here and use Save. Type a directive or press Ctrl+Space "
@@ -1653,12 +1922,13 @@ private:
                 "Type a directive or press Ctrl+Space for TXI index suggestions. Save or convert the texture to write it.");
         }
         txiHelp_->Wrap(FromDIP(380));
-        txiEditor_->setValue(wxui::toWx(texture.txi));
+        txiEditor_->setValue(wxui::toWx(texture.txi), !resetExport);
         summary_->ChangeValue(wxui::toWx(document_.summary()));
         loading_ = false;
         refreshTxiValidation();
         refreshPreview();
         updateWindowState();
+        refreshExportSummary();
         Layout();
     }
 
@@ -1704,6 +1974,28 @@ private:
         mipChoice_->SetSelection(std::clamp(previous,0,static_cast<int>(maximum)));mipChoice_->Enable(maximum>0);
     }
 
+    void clearDisplayCache() {
+        displayImages_.clear(); displayedKeys_.clear(); displayBytes_ = 0;
+    }
+    wxImage displayImage(const DisplayKey& key) {
+        const auto found = std::find_if(displayImages_.begin(), displayImages_.end(),
+            [&](const auto& item) { return item.key == key; });
+        if (found != displayImages_.end()) {
+            displayImages_.splice(displayImages_.begin(), displayImages_, found);
+            return displayImages_.front().image; // wxImage shares immutable pixel storage.
+        }
+        auto image = makePreviewImage(*key.layer, key.mode);
+        constexpr std::size_t budget = 64u * 1024u * 1024u;
+        const std::size_t bytes = image.IsOk() ? static_cast<std::size_t>(image.GetWidth()) * image.GetHeight() * 3u : 0;
+        if (bytes && bytes <= budget) {
+            while (!displayImages_.empty() && (displayBytes_ + bytes > budget || displayImages_.size() >= 64)) {
+                displayBytes_ -= displayImages_.back().bytes; displayImages_.pop_back();
+            }
+            displayImages_.push_front({key, image, bytes}); displayBytes_ += bytes;
+        }
+        return image;
+    }
+
     void refreshPreview() {
         const auto retainedView=canvas_ ? canvas_->view() : TextureCanvas::View{};
         if (!document_.isOpen()) {
@@ -1723,8 +2015,14 @@ private:
             const auto* image=comparisonTexture(pane);
             if(!canvas)continue;
             const auto* pixels=image?previewLayerAt(*image,mappedLayer(*image,layerIndex),mipIndex):nullptr;
-            if(pixels)canvas->setImage(makePreviewImage(*pixels,previewMode));
+            // Do not rebuild unchanged panes when another pane animates. A
+            // bounded LRU also reuses frames/channel views when revisited.
+            const DisplayKey key{pixels, pane == 0 ? document_.pixelRevision() : 0, previewMode};
+            const auto displayed = displayedKeys_.find(canvas);
+            if (displayed != displayedKeys_.end() && displayed->second == key) continue;
+            if (pixels) canvas->setImage(displayImage(key));
             else canvas->clearImage("Selected mip / frame is not present");
+            displayedKeys_[canvas] = key;
         }
         applyToPreviewCanvases([&](auto& c){c.setView(retainedView);});
         refreshStatus();
@@ -1754,7 +2052,7 @@ private:
             });
         }
         if (issues.empty()) {
-            txiSummary_->SetLabel(document_.texture().txi.empty() ? "No TXI metadata" : "TXI validation passed");
+            txiSummary_->SetLabel(document_.texture().txi.empty() ? "No TXI metadata" : "TXI syntax/directive checks passed (not a game-layout check)");
         } else {
             txiSummary_->SetLabel(wxString::Format("%llu error(s), %llu warning(s), %llu information note(s)",
                 static_cast<unsigned long long>(errors), static_cast<unsigned long long>(warnings),
@@ -1772,13 +2070,16 @@ private:
         if (busy_ || loading_ || !document_.isOpen()) return;
         discardEncodedPreview();updateExportTarget();
         summary_->ChangeValue(wxui::toWx(document_.summary()));
+        refreshExportSummary();
         updateWindowState();
     }
 
     void onTxiChanged() {
         if (busy_ || loading_ || !document_.isOpen()) return;
         document_.setTxi(wxui::toStd(txiEditor_->value()));
+        const bool playing=animationTimer_.IsRunning();
         discardEncodedPreview();
+        if (playing) setAnimationPlaying(true);
         summary_->ChangeValue(wxui::toWx(document_.summary()));
         refreshTxiValidation();
         updateWindowState();
@@ -1795,9 +2096,24 @@ private:
         const bool open = document_.isOpen();
         GetMenuBar()->Enable(wxID_UNDO,open&&document_.canUndo());
         GetMenuBar()->Enable(wxID_REDO,open&&document_.canRedo());
-        GetMenuBar()->Enable(ID_EXPORT_IMAGE,open);
+        const bool validExport=open && document_.outputIssue(proposedOutput(),optionsPanel_->options()).empty();
+        GetMenuBar()->Enable(ID_EXPORT_IMAGE,validExport);
+        GetMenuBar()->Enable(ID_APPLY_ENCODING,open);
+        GetMenuBar()->Enable(ID_COMPARE_IMAGES,open);
+        if(imageInfo_) {
+            if(open) {
+                const auto& t=document_.texture();
+                std::string info=std::to_string(t.canvasWidth)+" x "+std::to_string(t.canvasHeight)+" | "+texture::textureFileKindToString(t.kind)+" | "+texture::textureCompressionToString(t.preferredCompression)+"\n"+std::to_string(t.layers.size())+" frame(s)/face(s) | "+std::to_string(t.sourceMipMapCount)+" mip level(s)";
+                if(document_.layoutPending())info+="\nLayout changes pending — current image uses the loaded layout.";
+                imageInfo_->SetLabel(wxui::toWx(info));
+            } else imageInfo_->SetLabel("Open a texture to begin.");
+            imageInfo_->Wrap(FromDIP(330));
+        }
         for(int id:{ID_ENCODE_PREVIEW,ID_EXPORT_IMAGE,ID_APPLY_ENCODING,ID_COMMON_TXI})if(auto* button=FindWindow(id))button->Enable(open);
-        if(optionsPanel_)optionsPanel_->Enable(open);if(outputFormat_)outputFormat_->Enable(open);
+        if(optionsPanel_)optionsPanel_->Enable(open);
+        if(outputFormat_)outputFormat_->Enable(open);
+        for(int id:{ID_ENCODE_PREVIEW,ID_EXPORT_IMAGE}) if(auto* button=FindWindow(id))button->Enable(validExport);
+        if(auto* button=FindWindow(ID_CHOOSE_EXPORT))button->Enable(open);
         const bool pixels = open && document_.texture().hasPixels();
 #if defined(__EMSCRIPTEN__)
         const bool comparisonLoading = browserComparison_ != nullptr;
@@ -1831,6 +2147,7 @@ private:
         if (auto* toolbar = GetToolBar()) {
             toolbar->EnableTool(wxID_SAVE, open && document_.dirty());
             toolbar->EnableTool(ID_FIT_IMAGE, pixels);
+            toolbar->EnableTool(ID_EXPORT_IMAGE,validExport);
         }
     }
 
@@ -1916,6 +2233,7 @@ private:
         discardEncodedPreview();
         summary_->ChangeValue(wxui::toWx(document_.summary()));
         refreshPreview();
+        refreshExportSummary();
         updateWindowState();
     }
 
@@ -1932,7 +2250,7 @@ private:
         wxAboutDialogInfo info;
         info.SetName(kAppName);
         info.SetVersion(NEOTPC_VERSION);
-        info.SetDescription("TPC/TXB/TGA/DDS texture viewer, conflict comparator, TXI inspector, and converter for the Neo tool suite.");
+        info.SetDescription("TPC/TXB/TGA/DDS texture viewer, image comparator, TXI inspector, and converter for the Neo tool suite.");
         info.SetIcon(makeAppIcon());
         wxAboutBox(info, this);
     }
@@ -1965,6 +2283,13 @@ private:
     wxChoice* samplingChoice_=nullptr;
     wxChoice* gridChoice_=nullptr;
     wxStaticText* encodingSummary_=nullptr;
+    wxTextCtrl* exportPath_=nullptr;
+    wxStaticText* imageInfo_=nullptr;
+    fs::path exportDestination_;
+    bool exportDestinationChosen_=false;
+    std::string activeExportFormat_;
+    std::unordered_map<std::string,texture::TextureSaveOptions> exportPreferences_;
+    double fontScale_=1.0;
     bool busy_=false,syncingView_=false;
     std::chrono::steady_clock::time_point animationStart_;
     int animationStartFrame_=0;double animationFps_=8;
@@ -1972,6 +2297,9 @@ private:
     wxPanel* previewHost_ = nullptr;
     wxBoxSizer* previewHostSizer_ = nullptr;
     std::vector<ComparisonImage> comparisonImages_;
+    std::list<DisplayImage> displayImages_;
+    std::unordered_map<TextureCanvas*, DisplayKey> displayedKeys_;
+    std::size_t displayBytes_ = 0;
 #if defined(__EMSCRIPTEN__)
     std::unique_ptr<BrowserComparisonState> browserComparison_;
     std::uint64_t browserComparisonGeneration_ = 0;

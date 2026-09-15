@@ -12,6 +12,9 @@
 
 #include <wx/app.h>
 #include <wx/button.h>
+#include <wx/collpane.h>
+#include <wx/listctrl.h>
+#include <wx/utils.h>
 #include <wx/checkbox.h>
 #include <wx/choice.h>
 #include <wx/filepicker.h>
@@ -51,7 +54,7 @@ namespace {
 
 enum : int {
     ID_CONVERT = wxID_HIGHEST + 470,
-    ID_SELECT_BROWSER_INPUT,
+    ID_SELECT_BROWSER_INPUT, ID_SCAN, ID_INCLUDE_ROWS, ID_EXCLUDE_ROWS, ID_SHOW_OUTPUT,
 };
 
 #if defined(__EMSCRIPTEN__)
@@ -176,9 +179,9 @@ struct BrowserBatchState {
 };
 #endif
 
-BatchDialog::BatchDialog(wxWindow* parent, const wxString& initialDirectory, bool darkMode)
+BatchDialog::BatchDialog(wxWindow* parent, const wxString& initialDirectory, bool darkMode, BatchEditorHooks editor)
     : wxDialog(parent, wxID_ANY, "Batch Convert Textures", wxDefaultPosition, wxDefaultSize,
-               wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER) {
+               wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER), editor_(std::move(editor)) {
     auto* outer = new wxBoxSizer(wxVERTICAL);
     auto* form = new wxScrolledWindow(this,wxID_ANY,wxDefaultPosition,wxDefaultSize,wxVSCROLL);
     auto* root = new wxBoxSizer(wxVERTICAL);
@@ -224,7 +227,22 @@ BatchDialog::BatchDialog(wxWindow* parent, const wxString& initialDirectory, boo
     for (const char* value : {"tpc", "tga", "dds", "png", "jpg", "bmp", "txi"}) format_->Append(value);
     format_->SetSelection(0);
     paths->Add(format_, 1, wxEXPAND);
+    paths->Add(new wxStaticText(form, wxID_ANY, "Input type"), 0, wxALIGN_CENTER_VERTICAL);
+    inputType_ = new wxChoice(form, wxID_ANY);
+    for(const char* value:{"All supported","tpc","txb","tga","dds","png","jpg","bmp","txi"}) inputType_->Append(value);
+    inputType_->SetSelection(0);paths->Add(inputType_,1,wxEXPAND);
+    paths->Add(new wxStaticText(form, wxID_ANY, "Matching output-format inputs"), 0, wxALIGN_CENTER_VERTICAL);
+    matchingFormat_ = new wxChoice(form, wxID_ANY);
+    matchingFormat_->Append("Preserve original file (no recompression)");
+    matchingFormat_->Append("Re-encode using selected settings");
+    matchingFormat_->SetSelection(0);
+    matchingFormat_->SetToolTip("Preserve copies a matching container/dialect exactly, including its mip levels and TXI. Encoding controls then apply only to format/dialect conversions. Choose Re-encode to apply them to all selected inputs.");
+    matchingFormat_->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) { invalidatePlan(); });
+    paths->Add(matchingFormat_, 1, wxEXPAND);
     root->Add(paths, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(10));
+    auto* policyNote = new wxStaticText(form, wxID_ANY,
+        "Preserve copies matching containers/dialects exactly. Encoding controls apply only to conversions; choose Re-encode to rebuild matching files.");
+    policyNote->Wrap(FromDIP(700)); root->Add(policyNote, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(10));
 
     auto* flags = new wxBoxSizer(wxHORIZONTAL);
     recursive_ = new wxCheckBox(form, wxID_ANY, "Include subfolders");
@@ -240,9 +258,28 @@ BatchDialog::BatchDialog(wxWindow* parent, const wxString& initialDirectory, boo
 
     options_ = new EncodingOptionsPanel(form);
     format_->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) {
+        invalidatePlan();
         options_->setTarget(neotpc::texture::kindForExtension(std::filesystem::path("output." + wxui::toStd(format_->GetStringSelection()))));
     });
+    options_->setChangeHandler([this]{invalidatePlan();});
     root->Add(options_, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(10));
+    inputType_->Bind(wxEVT_CHOICE,[this](wxCommandEvent&){invalidatePlan();});
+    recursive_->Bind(wxEVT_CHECKBOX,[this](wxCommandEvent&){invalidatePlan();});
+    overwrite_->Bind(wxEVT_CHECKBOX,[this](wxCommandEvent&){invalidatePlan();});
+    outputDirectory_->Bind(wxEVT_DIRPICKER_CHANGED,[this](wxFileDirPickerEvent&){if(!updatingOutput_)outputChosen_=true;invalidatePlan();});
+    if(auto* text=outputDirectory_->GetTextCtrl())text->Bind(wxEVT_TEXT,[this](wxCommandEvent& e){if(!updatingOutput_)outputChosen_=true;invalidatePlan();e.Skip();});
+#ifndef __EMSCRIPTEN__
+    auto inputChanged=[this] {
+        if(!outputChosen_) {
+            updatingOutput_=true;
+            outputDirectory_->SetPath(wxpath::toWx(wxpath::fromWx(inputDirectory_->GetPath()) / "converted"));
+            updatingOutput_=false;
+        }
+        invalidatePlan();
+    };
+    inputDirectory_->Bind(wxEVT_DIRPICKER_CHANGED,[inputChanged](wxFileDirPickerEvent&){inputChanged();});
+    if(auto* text=inputDirectory_->GetTextCtrl())text->Bind(wxEVT_TEXT,[inputChanged](wxCommandEvent& e){inputChanged();e.Skip();});
+#endif
 
     form->SetSizer(root);form->SetScrollRate(0,FromDIP(12));form->FitInside();
     outer->Add(form,1,wxEXPAND);root=outer;
@@ -253,14 +290,39 @@ BatchDialog::BatchDialog(wxWindow* parent, const wxString& initialDirectory, boo
     root->Add(browserProgress_, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(10));
 #endif
 
-    report_ = new wxTextCtrl(this, wxID_ANY, wxEmptyString, wxDefaultPosition, FromDIP(wxSize(640, 130)),
+    items_=new wxListCtrl(this,wxID_ANY,wxDefaultPosition,FromDIP(wxSize(720,200)),wxLC_REPORT);
+    wxui::setColumns(*items_,{{"Include",65},{"Source",230},{"Output",230},{"Status",200}});
+    items_->SetName("Reviewed batch destinations");
+    root->Add(items_,1,wxEXPAND|wxLEFT|wxRIGHT|wxBOTTOM,FromDIP(10));
+    auto* selection=new wxBoxSizer(wxHORIZONTAL);
+    selection->Add(new wxButton(this,ID_INCLUDE_ROWS,"Include selected"),0,wxRIGHT,FromDIP(6));
+    selection->Add(new wxButton(this,ID_EXCLUDE_ROWS,"Exclude selected"),0,wxRIGHT,FromDIP(6));
+    auto* openOutput=new wxButton(this,ID_SHOW_OUTPUT,"Open output folder");
+    selection->Add(openOutput,0);root->Add(selection,0,wxLEFT|wxRIGHT|wxBOTTOM,FromDIP(10));
+#if defined(__EMSCRIPTEN__)
+    openOutput->Hide();
+#else
+    Bind(wxEVT_BUTTON,[this](wxCommandEvent&){const auto out=wxpath::fromWx(outputDirectory_->GetPath());std::error_code ec;if(fs::is_directory(out,ec))wxLaunchDefaultApplication(wxpath::toWx(out));},ID_SHOW_OUTPUT);
+#endif
+    Bind(wxEVT_BUTTON,[this](wxCommandEvent&){setSelectedRows(true);},ID_INCLUDE_ROWS);
+    Bind(wxEVT_BUTTON,[this](wxCommandEvent&){setSelectedRows(false);},ID_EXCLUDE_ROWS);
+    resultSummary_=new wxStaticText(this,wxID_ANY,"Scan to review destinations. Nothing is written until Convert.");
+    resultSummary_->Wrap(FromDIP(700));root->Add(resultSummary_,0,wxEXPAND|wxLEFT|wxRIGHT|wxBOTTOM,FromDIP(10));
+    auto* details=new wxCollapsiblePane(this,wxID_ANY,"Technical details",wxDefaultPosition,wxDefaultSize,wxCP_DEFAULT_STYLE|wxCP_NO_TLW_RESIZE);
+    auto* detailSizer=new wxBoxSizer(wxVERTICAL);
+    report_ = new wxTextCtrl(details->GetPane(), wxID_ANY, wxEmptyString, wxDefaultPosition, FromDIP(wxSize(640, 100)),
                              wxTE_MULTILINE | wxTE_READONLY | wxTE_DONTWRAP);
-    report_->SetHint("The conversion report will appear here.");
-    root->Add(report_, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(10));
+    detailSizer->Add(report_,1,wxEXPAND);details->GetPane()->SetSizer(detailSizer);
+    root->Add(details,0,wxEXPAND|wxLEFT|wxRIGHT|wxBOTTOM,FromDIP(10));
+    details->Bind(wxEVT_COLLAPSIBLEPANE_CHANGED,[this](wxCollapsiblePaneEvent&){Layout();});
 
     auto* buttons = new wxBoxSizer(wxHORIZONTAL);
     buttons->AddStretchSpacer();
-    convertButton_ = new wxButton(this, ID_CONVERT, "Convert");
+    scanButton_ = new wxButton(this, ID_SCAN, "Scan / Review");
+    buttons->Add(scanButton_,0,wxRIGHT,FromDIP(8));
+    convertButton_ = new wxButton(this, ID_CONVERT, "Convert 0 ready files");
+    convertButton_->Disable();
+    Bind(wxEVT_BUTTON,[this](wxCommandEvent&){onScan();},ID_SCAN);
     closeButton_ = new wxButton(this, wxID_CLOSE, "Close");
     buttons->Add(convertButton_, 0, wxRIGHT, FromDIP(8));
     buttons->Add(closeButton_);
@@ -312,6 +374,105 @@ BatchDialog::~BatchDialog() {
 #endif
 }
 
+bool BatchDialog::acceptsInput(const fs::path& input) const {
+    if(inputType_->GetSelection()==0)return true;
+    auto ext=texture::extensionLower(input);if(ext=="jpeg"||ext=="jpe")ext="jpg";
+    return ext==wxui::toStd(inputType_->GetStringSelection());
+}
+void BatchDialog::invalidatePlan() {
+    if(nativeBusy_)return;
+#if defined(__EMSCRIPTEN__)
+    if(browserBatch_)return;
+    browserPlan_.reset(); browserExcludedInputs_.clear();
+#endif
+    plan_.reset();planReady_=false;
+    if(convertButton_) {convertButton_->SetLabel("Convert 0 ready files");convertButton_->Disable();}
+    if(resultSummary_)resultSummary_->SetLabel("Settings changed. Scan to review destinations before converting.");
+}
+void BatchDialog::showRows(const std::vector<texture::BatchItemResult>& rows,bool selectReady) {
+    displayedRows_=rows;included_.clear();items_->DeleteAllItems();
+    for(const auto& row:rows) {
+        const bool include=selectReady && row.status==texture::BatchItemStatus::Ready && acceptsInput(row.input);
+        included_.push_back(include);
+        const char* state=row.status==texture::BatchItemStatus::Ready?"Ready":row.status==texture::BatchItemStatus::Conflict?"Conflict":row.status==texture::BatchItemStatus::Converted?"Created":row.status==texture::BatchItemStatus::Failed?"Failed":"Skipped";
+#if defined(__EMSCRIPTEN__)
+        if (row.status == texture::BatchItemStatus::Ready) state = "Pending input check";
+#endif
+        wxui::appendRow(*items_,{include?"Yes":"No",texture::pathToUtf8(row.input),texture::pathToUtf8(row.output),std::string(state)+(row.message.empty()?"":" — "+row.message)});
+    }
+    refreshPlanCount();
+}
+void BatchDialog::refreshPlanCount() {
+    const auto count=static_cast<unsigned long long>(std::count(included_.begin(),included_.end(),true));
+    convertButton_->SetLabel(wxString::Format("Convert %llu ready files",count));
+    convertButton_->Enable(planReady_ && count>0);
+    resultSummary_->SetLabel(wxString::Format("%llu selected; %llu scanned. Conflicts are held; excluded rows are not converted.",count,static_cast<unsigned long long>(displayedRows_.size())));
+}
+void BatchDialog::setSelectedRows(bool include) {
+    if (nativeBusy_ || !planReady_) return;
+#if defined(__EMSCRIPTEN__)
+    if (browserBatch_) return;
+    auto excluded = browserExcludedInputs_;
+#else
+    if (!plan_) return;
+    auto excluded = plan_->excludedInputs;
+#endif
+    std::vector<fs::path> selected;
+    for (long row = items_->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED); row != -1;
+         row = items_->GetNextItem(row, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED)) {
+        if (static_cast<std::size_t>(row) >= displayedRows_.size()) continue;
+        const auto input = displayedRows_[row].input;
+        selected.push_back(input);
+        // Held rows can be excluded, releasing their destinations (not their sources).
+        if (include) {
+            if (!acceptsInput(input)) continue;
+            excluded.erase(std::remove(excluded.begin(), excluded.end(), input), excluded.end());
+        } else if (std::find(excluded.begin(), excluded.end(), input) == excluded.end()) excluded.push_back(input);
+    }
+    if (selected.empty()) return;
+#if defined(__EMSCRIPTEN__)
+    browserExcludedInputs_ = std::move(excluded);
+    browserPlan_.reset(); planReady_ = false; convertButton_->Disable();
+    startBrowserConversion(true);
+#else
+    try {
+        TextureBusyGuard busy(nativeBusy_);
+        const auto old = *plan_;
+        auto revised = runTextureTask(this, "Review selected destinations", [&](TextureTaskProgress&) {
+            return texture::replanTextureBatch(old, excluded);
+        });
+        if (revised.items.size() != old.items.size()) throw texture::TextureError("The input folder changed. Scan it again.");
+        for (std::size_t i = 0; i < old.items.size(); ++i)
+            if (old.items[i].input != revised.items[i].input) throw texture::TextureError("The input folder changed. Scan it again.");
+        plan_ = std::move(revised); report_->ChangeValue(wxui::toWx(plan_->summary())); showRows(plan_->items, true);
+    } catch (const texture::OperationCancelled&) { invalidatePlan(); resultSummary_->SetLabel("Review cancelled; scan again before converting."); }
+      catch (const std::exception& error) { invalidatePlan(); wxui::showError(this, error); }
+#endif
+    for (std::size_t i = 0; i < displayedRows_.size(); ++i)
+        if (std::find(selected.begin(), selected.end(), displayedRows_[i].input) != selected.end())
+            items_->SetItemState(static_cast<long>(i), wxLIST_STATE_SELECTED, wxLIST_STATE_SELECTED);
+}
+void BatchDialog::onScan() {
+    if(nativeBusy_)return;
+    invalidatePlan();
+#if defined(__EMSCRIPTEN__)
+    if(browserBatch_)return;
+    startBrowserConversion(true);
+#else
+    const auto input=wxpath::fromWx(inputDirectory_->GetPath()), output=wxpath::fromWx(outputDirectory_->GetPath());
+    if(input.empty()||output.empty()){wxMessageBox("Choose input and output folders.","Batch",wxOK|wxICON_INFORMATION,this);return;}
+    texture::BatchOptions options;options.outputExtension=wxui::toStd(format_->GetStringSelection());options.recursive=recursive_->GetValue();options.overwrite=overwrite_->GetValue();options.saveOptions=options_->options();
+    if (inputType_->GetSelection() != 0) options.inputExtension = wxui::toStd(inputType_->GetStringSelection());
+    options.preserveMatchingFormat = matchingFormat_->GetSelection() == 0;
+    try {
+        TextureBusyGuard busy(nativeBusy_);
+        plan_=runTextureTask(this,"Scan batch destinations",[&](TextureTaskProgress&){return texture::planTextureBatch(input,output,options);});
+        planReady_=true;report_->ChangeValue(wxui::toWx(plan_->summary()));showRows(plan_->items,true);
+    } catch(const texture::OperationCancelled&){invalidatePlan();resultSummary_->SetLabel("Scan cancelled; nothing was written.");}
+      catch(const std::exception& e){invalidatePlan();wxui::showError(this,e);}
+#endif
+}
+
 void BatchDialog::onConvert() {
     if(nativeBusy_)return;
 #if defined(__EMSCRIPTEN__)
@@ -321,50 +482,50 @@ void BatchDialog::onConvert() {
     }
     startBrowserConversion();
 #else
-    const auto input = wxpath::fromWx(inputDirectory_->GetPath());
-    const auto output = wxpath::fromWx(outputDirectory_->GetPath());
-    if (input.empty() || output.empty()) {
-        wxMessageBox("Choose both input and output folders.", "Batch conversion",
-                     wxOK | wxICON_WARNING, this);
-        return;
+    if(!planReady_ || !plan_) {onScan();return;}
+    auto selected=*plan_;
+    std::string confirmation;
+    if (selected.conflicts()) {
+        confirmation += "Conflicting rows remain excluded. Convert only the selected, independently safe rows.\n\n";
+        selected.options.skipConflicts = true;
     }
-
-    neotpc::texture::BatchOptions options;
-    options.outputExtension = wxui::toStd(format_->GetStringSelection());
-    options.recursive = recursive_->GetValue();
-    options.overwrite = overwrite_->GetValue();
-    options.saveOptions = options_->options();
-
-    if(nativeBusy_) return;
+    if (selected.options.overwrite)
+        confirmation += "Selected outputs and their TXI companions may be replaced. Other batch input dependencies remain protected.\n\n";
+    const auto alphaLoss = std::count_if(selected.items.begin(), selected.items.end(), [](const auto& row) {
+        return row.status == texture::BatchItemStatus::Ready && row.discardsAlpha;
+    });
+    if (alphaLoss) confirmation += std::to_string(alphaLoss) +
+        " selected JPEG output(s) will discard alpha, including any transparency or mask data.\n\n";
+    try {
+        if (editor_.prepare) confirmation += editor_.prepare(selected);
+    } catch (const std::exception& error) { wxui::showError(this, error); return; }
+    if (!confirmation.empty() && !wxui::confirm(this, "Confirm batch conversion", wxui::toWx(confirmation + "Continue?"))) return;
     try {
         TextureBusyGuard busy(nativeBusy_);
-        auto plan=runTextureTask(this,"Plan batch destinations",[&](TextureTaskProgress&) {
-            return neotpc::texture::planTextureBatch(input,output,options);
-        });
-        report_->ChangeValue(wxui::toWx(plan.summary()));
-        if(plan.ready()==0) {
-            wxMessageBox("No safe new conversions are ready. See the preflight report; no files were changed.",
-                         "Batch preflight",wxOK|wxICON_INFORMATION,this); return;
-        }
-        if(plan.conflicts()!=0) {
-            if(!wxui::confirm(this,"Conflicting destinations held",
-                wxString::Format("%llu conflicting input(s) will NOT be converted. Resource names will not be changed.\n\nConvert only the %llu independent safe input(s)?",
-                    static_cast<unsigned long long>(plan.conflicts()),static_cast<unsigned long long>(plan.ready())))) return;
-            plan.options.skipConflicts=true;
-        }
-        if(options.overwrite && !wxui::confirm(this,"Replace existing outputs?",
-            "This batch can replace existing output images and their TXI sidecars. Input dependencies are protected. Continue?")) return;
         const auto result=runTextureTask(this,"Convert textures",[&](TextureTaskProgress& state) {
-            return neotpc::texture::executeTextureBatch(plan,[&](std::size_t done,std::size_t total,const fs::path& source) {
-                state.set(done,total,std::to_string(done)+" / "+std::to_string(total)+" complete\n"+neotpc::texture::pathToUtf8(source));
-                return !state.cancelled.load();
+            return texture::executeTextureBatch(selected,[&](std::size_t done,std::size_t total,const fs::path& input) {
+                state.set(done,total,std::to_string(done)+" / "+std::to_string(total)+" complete\n"+texture::pathToUtf8(input));return !state.cancelled.load();
             });
         });
+        // Even a cancelled/partly failed batch can contain committed outputs.
+        // Refresh their owner before presenting results; never refresh failures.
+        if (editor_.completed) {
+            try { editor_.completed(this, result); }
+            catch (const std::exception& error) {
+                wxMessageBox(wxString("The batch finished, but the open texture could not be refreshed. Its in-memory edits remain available.\n\n") +
+                    wxui::toWx(error.what()), "Open texture refresh", wxOK | wxICON_WARNING, this);
+            }
+        }
         report_->ChangeValue(wxui::toWx(result.summary()));
-        if(result.failed) wxMessageBox("Some inputs failed. Completed outputs were retained; see the report.","Batch conversion",wxOK|wxICON_WARNING,this);
-    } catch(const neotpc::texture::OperationCancelled&) {
-        report_->AppendText("\nCancelled. Completed files remain; the current unfinished image/TXI pair was not committed.\n");
-    } catch(const std::exception& error) { wxui::showError(this,error); }
+        auto completed=selected.items;
+        for(auto& row:completed) {auto found=std::find_if(result.items.begin(),result.items.end(),[&](const auto& item){return item.input==row.input;});
+            if(found!=result.items.end())row=*found;else{row.status=texture::BatchItemStatus::Skipped;row.message="Not run (cancelled)";}}
+        showRows(completed,false);
+        resultSummary_->SetLabel(wxString::Format("%llu created, %llu skipped, %llu failed, %llu held%s",
+            static_cast<unsigned long long>(result.converted),static_cast<unsigned long long>(result.skipped),static_cast<unsigned long long>(result.failed),static_cast<unsigned long long>(result.conflicts),wxString(result.cancelled?" — cancelled":"").c_str()));
+        planReady_=false;convertButton_->Disable();
+    } catch(const texture::OperationCancelled&) {invalidatePlan();resultSummary_->SetLabel("Cancelled. Completed outputs remain; the unfinished pair was not committed.");}
+      catch(const std::exception& error){invalidatePlan();wxui::showError(this,error);}
 
 #endif
 }
@@ -485,6 +646,7 @@ void BatchDialog::installBrowserInput(std::uint32_t sessionId,
         retainedIds.push_back(file.fileId);
     }
 
+    invalidatePlan();
     releaseBrowserInput();
     browserInputSessionId_ = sessionId;
     browserInputDisplayName_ = displayName.empty() ? "Selected browser folder" : std::move(displayName);
@@ -506,7 +668,36 @@ void BatchDialog::releaseBrowserInput() noexcept {
     browserInputFiles_.clear();
 }
 
-void BatchDialog::startBrowserConversion() {
+void BatchDialog::startBrowserConversion(bool reviewOnly) {
+    if(!reviewOnly && browserPlan_ && planReady_) {
+        auto state=std::make_unique<BrowserBatchState>(*browserPlan_);
+        std::vector<BrowserBatchItem> ready;
+        for (const auto& item : state->items) {
+            auto found = std::find_if(displayedRows_.begin(), displayedRows_.end(), [&](const auto& row) { return row.input == item.relativePath; });
+            if (found != displayedRows_.end() && found->status == texture::BatchItemStatus::Ready) ready.push_back(item);
+            else {
+                const auto row = found == displayedRows_.end() ? texture::BatchItemResult{item.relativePath, item.outputRelative, texture::BatchItemStatus::Skipped, "Excluded in reviewed plan"} : *found;
+                state->report.items.push_back(row);
+                if (row.status == texture::BatchItemStatus::Conflict) ++state->report.conflicts; else ++state->report.skipped;
+            }
+        }
+        state->items = std::move(ready);
+        if (state->report.conflicts && !wxui::confirm(this, "Conflicts held", "Convert only the selected, independently safe rows? Conflicts remain excluded.")) {
+            return;
+        }
+        if(state->items.empty()){invalidatePlan();return;}
+        // Browser Scan is index-only. Warn once conservatively before reading
+        // any candidate, not once per file after encoding has already begun.
+        if (state->options.outputExtension == "jpg" &&
+            !wxui::confirm(this, "JPEG output discards alpha",
+                "Any converted input with transparency or mask data will lose its alpha channel. Continue with these JPEG outputs?")) return;
+        try {TextureBusyGuard busy(nativeBusy_);runTextureTask(this,"Check browser output folder",[&](TextureTaskProgress&){browser::checkEmptyBatchOutput(state->outputRoot);});}
+        catch(const std::exception& e){invalidatePlan();wxui::showError(this,e);return;}
+        browserPlan_.reset(); browserBatch_=std::move(state);planReady_=false;
+        browserProgress_->SetRange(static_cast<int>(browserBatch_->items.size()));browserProgress_->SetValue(0);browserProgress_->Show();
+        setBrowserControlsBusy(true);continueBrowserConversion();return;
+    }
+    if(!reviewOnly){onScan();return;}
     if (browserInputSessionId_ == 0 || browserInputFiles_.empty()) {
         wxMessageBox("Choose an input folder with the browser Browse button first.",
                      "Batch conversion", wxOK | wxICON_WARNING, this);
@@ -572,7 +763,7 @@ void BatchDialog::startBrowserConversion() {
     std::uint64_t workloadBytes = 0;
     for (const auto& entry : indexed) {
         const std::string extension = neotpc::texture::extensionLower(entry.relative);
-        if (extension == "txi" && pixelStems.find(browserStemKey(entry.relative)) != pixelStems.end()) {
+        if (inputType_->GetStringSelection() != "txi" && extension == "txi" && pixelStems.find(browserStemKey(entry.relative)) != pixelStems.end()) {
             continue;
         }
 
@@ -599,22 +790,29 @@ void BatchDialog::startBrowserConversion() {
         }
     }
 
-    std::unordered_map<std::string,std::vector<std::size_t>> claims;
-    for(std::size_t i=0;i<items.size();++i){
-        claims[browserPathKey(items[i].outputRelative)].push_back(i);
-        if(outputUsesSidecar(outputExtension)){auto txi=items[i].outputRelative;txi.replace_extension(".txi");claims[browserPathKey(txi)].push_back(i);}
+    texture::BatchOptions selectionOptions;
+    selectionOptions.outputExtension = outputExtension;
+    selectionOptions.saveOptions = options_->options();
+    selectionOptions.preserveMatchingFormat = matchingFormat_->GetSelection() == 0;
+    if (inputType_->GetSelection() != 0) selectionOptions.inputExtension = wxui::toStd(inputType_->GetStringSelection());
+    std::unordered_map<std::string, std::vector<std::size_t>> claims;
+    std::vector<texture::BatchItemResult> rows;
+    for (std::size_t i = 0; i < items.size(); ++i) {
+        const auto& item = items[i];
+        const bool selected = texture::batchInputRequested(item.relativePath, selectionOptions, browserExcludedInputs_);
+        rows.push_back({item.relativePath, item.outputRelative,
+            selected ? texture::BatchItemStatus::Ready : texture::BatchItemStatus::Skipped,
+            selected ? (outputExtension == "jpg" ? "Destination clear; JPEG discards any alpha; input checks pending" :
+                "Destination clear; input/encoding checks occur before publication") : "Not selected; source remains retained"});
+        if (!selected) continue;
+        claims[browserPathKey(item.outputRelative)].push_back(i);
+        if (outputUsesSidecar(outputExtension)) {
+            auto txi = item.outputRelative; txi.replace_extension(".txi"); claims[browserPathKey(txi)].push_back(i);
+        }
     }
-    std::set<std::size_t> held;
-    for(const auto& claim:claims)if(claim.second.size()>1)held.insert(claim.second.begin(),claim.second.end());
-    std::vector<texture::BatchItemResult> conflicts;
-    if(!held.empty()) {
-        std::string details="Conflicting image/TXI destinations (names will not be changed):\n";
-        for(auto i:held){const auto& item=items[i];details+=item.relativePath.generic_string()+" -> "+item.outputRelative.generic_string()+"\n";
-            conflicts.push_back({item.relativePath,item.outputRelative,texture::BatchItemStatus::Conflict,"Destination collision; not written"});}
-        report_->ChangeValue(wxui::toWx(details));
-        if(held.size()==items.size()){wxMessageBox("All inputs conflict. No output was written. See the report.","Batch preflight",wxOK|wxICON_WARNING,this);return;}
-        if(!wxui::confirm(this,"Hold conflicting inputs","See the preflight report. Convert only the independent, nonconflicting inputs?"))return;
-        std::vector<BrowserBatchItem> safe;for(std::size_t i=0;i<items.size();++i)if(!held.count(i))safe.push_back(std::move(items[i]));items=std::move(safe);
+    for (const auto& claim : claims) if (claim.second.size() > 1) for (auto i : claim.second) {
+        rows[i].status = texture::BatchItemStatus::Conflict;
+        rows[i].message = "Selected outputs collide; exclude a contender to resolve";
     }
     // The selected host folder must genuinely be empty. Virtual MEMFS existence
     // does not tell us whether a host output would overwrite an unread input.
@@ -654,22 +852,15 @@ void BatchDialog::startBrowserConversion() {
     state->options.outputExtension = outputExtension;
     state->options.recursive = recursive_->GetValue();
     state->options.overwrite = false;
-    state->options.saveOptions = options_->options();
+    state->options.saveOptions = selectionOptions.saveOptions;
+    state->options.inputExtension = selectionOptions.inputExtension;
+    state->options.preserveMatchingFormat = selectionOptions.preserveMatchingFormat;
     state->outputRoot = outputRoot;
-    state->report.discovered = state->items.size()+conflicts.size();
-    state->report.conflicts=conflicts.size();state->report.items=std::move(conflicts);
-    browserBatch_ = std::move(state);
+    state->report.discovered = state->items.size();
+    browserPlan_ = std::move(state); planReady_ = true; showRows(rows, true);
+    report_->ChangeValue(wxui::toWx("Retained input: " + formatByteCount(workloadBytes) +
+        ". Destinations are checked; input/encoding validation runs per file before publication.\n"));
 
-    browserProgress_->SetRange(static_cast<int>(browserBatch_->items.size()));
-    browserProgress_->SetValue(0);
-    browserProgress_->Show();
-    Layout();
-    report_->ChangeValue(
-        wxString::Format("Prepared %llu texture(s), %s retained input.\nConversion uses one bounded file at a time.\n",
-                         static_cast<unsigned long long>(browserBatch_->items.size()),
-                         wxui::toWx(formatByteCount(workloadBytes)).c_str()));
-    setBrowserControlsBusy(true);
-    continueBrowserConversion();
 }
 
 void BatchDialog::continueBrowserConversion() {
@@ -761,16 +952,19 @@ void BatchDialog::encodeBrowserBatchItem(std::uint64_t generation) {
             }
             if(!browserBatch_ || browserBatch_->cancelRequested)throw texture::OperationCancelled();
         });
-        auto image=texture::loadTextureBytes(browserBatch_->sourceBytes,item.relativePath,std::move(browserBatch_->sidecarTxi));
+        std::optional<std::vector<std::uint8_t>> sidecar;
+        if (item.sidecar) sidecar.emplace(browserBatch_->sidecarTxi.begin(), browserBatch_->sidecarTxi.end());
+        auto result=texture::encodeBatchTexture(browserBatch_->sourceBytes,sidecar,item.relativePath,item.outputRelative,browserBatch_->options);
         std::vector<std::uint8_t>().swap(browserBatch_->sourceBytes);browserBatch_->sidecarTxi.clear();
-        auto encoded=texture::encodeTexture(image,item.outputRelative,browserBatch_->options.saveOptions);
+        auto encoded=std::move(result.encoded);
         texture::checkOperation();
         browserBatch_->encodingInProgress=false;browserBatch_->publishInProgress=true;
         // Publication is a non-cancellable new-file pair commit. On error the
         // bridge removes newly created members; no automatic download fallback.
         browser::publishNewBatchOutput(browserBatch_->outputRoot,item.outputRelative,encoded);
         browserBatch_->publishInProgress=false;
-        completeBrowserBatchItem(true,"Created image/TXI pair");
+        completeBrowserBatchItem(true, result.preserved ? "Copied original bytes (including existing mip levels/TXI)" :
+            result.discardedAlpha ? "Created JPEG; alpha channel discarded (including mask data)" : "Created image/TXI pair (encoded)");
     } catch(const texture::OperationCancelled&) {
         if(browserBatch_){browserBatch_->encodingInProgress=false;browserBatch_->publishInProgress=false;browserBatch_->cancelRequested=true;finishBrowserConversion();}
     } catch(const std::exception& error) {
@@ -829,7 +1023,11 @@ void BatchDialog::finishBrowserConversion() {
     Layout();
     report_->ChangeValue(wxui::toWx(report.summary()));
 
+    showRows(report.items,false);planReady_=false;convertButton_->Disable();
+    resultSummary_->SetLabel(wxString::Format("%llu created, %llu skipped, %llu failed, %llu held",
+        static_cast<unsigned long long>(report.converted),static_cast<unsigned long long>(report.skipped),static_cast<unsigned long long>(report.failed),static_cast<unsigned long long>(report.conflicts)));
     if (report.cancelled) {
+        resultSummary_->SetLabel(resultSummary_->GetLabel()+" — cancelled");
         wxMessageBox("Batch conversion stopped. Completed output files were already committed.",
                      "Batch conversion", wxOK | wxICON_WARNING, this);
     } else if (report.failed != 0) {
@@ -874,8 +1072,12 @@ void BatchDialog::setBrowserControlsBusy(bool busy) {
     overwrite_->Enable(false);
     options_->Enable(!busy);
     closeButton_->Enable(true);
-    convertButton_->Enable(true);
-    convertButton_->SetLabel(busy ? "Cancel" : "Convert");
+    scanButton_->Enable(!busy);
+    inputType_->Enable(!busy);
+    matchingFormat_->Enable(!busy);
+    items_->Enable(!busy);
+    convertButton_->Enable(busy);
+    convertButton_->SetLabel(busy ? "Cancel" : "Scan again to convert");
 }
 
 #endif

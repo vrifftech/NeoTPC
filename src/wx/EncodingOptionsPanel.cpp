@@ -3,6 +3,8 @@
 #include "NeoWxUi.hpp"
 
 #include <wx/checkbox.h>
+#include <wx/collpane.h>
+#include <wx/scrolwin.h>
 #include <wx/choice.h>
 #include <wx/sizer.h>
 #include <wx/spinctrl.h>
@@ -32,13 +34,18 @@ EncodingOptionsPanel::EncodingOptionsPanel(wxWindow* parent)
 
     compression_ = makeChoice(this, {"auto", "none", "grey", "dxt1", "dxt3", "dxt5"});
     ddsDialect_ = makeChoice(this, {"Preserve source / game for new DDS", "Game DDS (BioWare)", "Standard DDS (interchange)"});
-    dxtQuality_ = makeChoice(this, {"fast", "normal", "high"});
-    dxtMetric_ = makeChoice(this, {"perceptual", "uniform"});
-    dxt1Threshold_ = new wxSpinCtrl(this, wxID_ANY, "128", wxDefaultPosition, wxDefaultSize,
+    auto* advanced = new wxCollapsiblePane(this, wxID_ANY, "Advanced encoding", wxDefaultPosition, wxDefaultSize, wxCP_DEFAULT_STYLE | wxCP_NO_TLW_RESIZE);
+    auto* details = advanced->GetPane();
+    auto* detailsSizer = new wxBoxSizer(wxVERTICAL);
+    auto* advancedGrid = new wxFlexGridSizer(2, FromDIP(6), FromDIP(10));
+    advancedGrid->AddGrowableCol(1, 1);
+    dxtQuality_ = makeChoice(details, {"fast", "normal", "high"});
+    dxtMetric_ = makeChoice(details, {"perceptual", "uniform"});
+    dxt1Threshold_ = new wxSpinCtrl(details, wxID_ANY, "128", wxDefaultPosition, wxDefaultSize,
                                     wxSP_ARROW_KEYS, 0, 255, 128);
-    jpegQuality_ = new wxSpinCtrl(this, wxID_ANY, "95", wxDefaultPosition, wxDefaultSize,
+    jpegQuality_ = new wxSpinCtrl(details, wxID_ANY, "95", wxDefaultPosition, wxDefaultSize,
                                   wxSP_ARROW_KEYS, 1, 100, 95);
-    alphaBlending_ = new wxSpinCtrlDouble(this, wxID_ANY, "1.0", wxDefaultPosition, wxDefaultSize,
+    alphaBlending_ = new wxSpinCtrlDouble(details, wxID_ANY, "1.0", wxDefaultPosition, wxDefaultSize,
                                           wxSP_ARROW_KEYS, -100000.0, 100000.0, 1.0, 0.05);
     alphaBlending_->SetDigits(4);
     compression_->SetName("Output compression");
@@ -47,13 +54,15 @@ EncodingOptionsPanel::EncodingOptionsPanel(wxWindow* parent)
     dxt1Threshold_->SetName("Standard DDS BC1 threshold");
     alphaBlending_->SetName("Native texture header value");
 
-    auto addRow = [this, grid](const wxString& label, wxWindow* control) {
-        grid->Add(new wxStaticText(this, wxID_ANY, label), 0, wxALIGN_CENTER_VERTICAL);
-        grid->Add(control, 1, wxEXPAND);
+    auto addRow = [grid, details, advancedGrid](const wxString& label, wxWindow* control) {
+        auto* parent = control->GetParent();
+        auto* rows = parent == details ? advancedGrid : grid;
+        rows->Add(new wxStaticText(parent, wxID_ANY, label), 0, wxALIGN_CENTER_VERTICAL);
+        rows->Add(control, 1, wxEXPAND);
     };
     mipmaps_ = makeChoice(this, {"Preserve existing / create if absent", "Rebuild from base image", "Base only"});
-    mipAlpha_ = makeChoice(this, {"Independent mask / data", "Transparency (alpha-aware)"});
-    mipColor_ = makeChoice(this, {"Stored values / data", "sRGB color (linear-light filter)"});
+    mipAlpha_ = makeChoice(details, {"Independent mask / data", "Transparency (alpha-aware)"});
+    mipColor_ = makeChoice(details, {"Stored values / data", "sRGB color (linear-light filter)"});
     mipmaps_->SetName("Mipmap policy");
     mipAlpha_->SetName("Mipmap alpha meaning");
     mipColor_->SetName("Mipmap color meaning");
@@ -69,15 +78,23 @@ EncodingOptionsPanel::EncodingOptionsPanel(wxWindow* parent)
     addRow("TPC/game DDS header float", alphaBlending_);
     outer->Add(grid, 0, wxEXPAND | wxALL, FromDIP(8));
 
-    weightAlpha_ = new wxCheckBox(this, wxID_ANY, "Weight DXT color error by alpha");
-    bicubic_ = new wxCheckBox(this, wxID_ANY, "Bicubic mipmap downsampling");
-    flipX_ = new wxCheckBox(this, wxID_ANY, "Flip horizontally on save");
-    flipY_ = new wxCheckBox(this, wxID_ANY, "Flip vertically on save");
+    detailsSizer->Add(advancedGrid, 0, wxEXPAND | wxBOTTOM, FromDIP(8));
+    weightAlpha_ = new wxCheckBox(details, wxID_ANY, "Weight DXT color error by alpha");
+    bicubic_ = new wxCheckBox(details, wxID_ANY, "Bicubic mipmap downsampling");
+    flipX_ = new wxCheckBox(details, wxID_ANY, "Flip output horizontally");
+    flipY_ = new wxCheckBox(details, wxID_ANY, "Flip output vertically");
     for (auto* checkbox : {weightAlpha_, bicubic_, flipX_, flipY_}) {
-        outer->Add(checkbox, 0, wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(8));
+        detailsSizer->Add(checkbox, 0, wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(8));
         checkbox->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) { notifyChanged(); });
     }
 
+    details->SetSizer(detailsSizer);
+    outer->Add(advanced, 0, wxEXPAND | wxALL, FromDIP(8));
+    advanced->Bind(wxEVT_COLLAPSIBLEPANE_CHANGED, [this](wxCollapsiblePaneEvent&) {
+        Layout();
+        if (auto* scroll = wxDynamicCast(GetParent(), wxScrolledWindow)) { scroll->Layout(); scroll->FitInside(); }
+        else GetParent()->Layout();
+    });
     for (auto* choice : {mipmaps_, mipAlpha_, mipColor_})
         choice->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) { notifyChanged(); });
     ddsDialect_->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) { notifyChanged(); });
@@ -108,7 +125,9 @@ EncodingOptionsPanel::EncodingOptionsPanel(wxWindow* parent)
 
 void EncodingOptionsPanel::setOptions(const neotpc::texture::TextureSaveOptions& options) {
     loading_ = true;
-    compression_->SetStringSelection(wxui::toWx(neotpc::texture::textureCompressionToString(options.compression)));
+    const auto compressionName = wxui::toWx(neotpc::texture::textureCompressionToString(options.compression));
+    if (compression_->FindString(compressionName) == wxNOT_FOUND) compression_->Append(compressionName);
+    compression_->SetStringSelection(compressionName);
     dxtQuality_->SetStringSelection(wxui::toWx(neotpc::texture::dxtCompressionQualityToString(options.dxtQuality)));
     dxtMetric_->SetStringSelection(wxui::toWx(neotpc::texture::dxtErrorMetricToString(options.dxtMetric)));
     weightAlpha_->SetValue(options.weightColorByAlpha);
@@ -165,6 +184,15 @@ void EncodingOptionsPanel::updateControls() {
     const auto dialect = static_cast<DdsDialect>(ddsDialect_->GetSelection());
     const bool standard = dds && (dialect == DdsDialect::Standard ||
         (dialect == DdsDialect::Auto && sourceDialect_ == DdsDialect::Standard));
+    const wxString previous = compression_->GetStringSelection();
+    wxArrayString valid;
+    valid.Add("auto");
+    if (!dds || standard) { valid.Add("none"); if (!dds) valid.Add("grey"); }
+    valid.Add("dxt1"); if (standard) valid.Add("dxt3"); valid.Add("dxt5");
+    bool differs = compression_->GetCount() != valid.size();
+    for (unsigned i=0; !differs && i<valid.size(); ++i) differs = compression_->GetString(i) != valid[i];
+    if (differs) { compression_->Clear(); compression_->Append(valid); }
+    if (!compression_->SetStringSelection(previous)) compression_->SetSelection(0);
     const auto compression = textureCompressionFromString(wxui::toStd(compression_->GetStringSelection()));
     const bool dxt = container && compression != TextureCompression::None && compression != TextureCompression::Gray;
     compression_->Enable(container);
