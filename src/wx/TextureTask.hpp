@@ -1,6 +1,7 @@
 #pragma once
 // One bounded operation at a time. Worker code never accesses a wx control.
 // The dialog owns/join-waits the worker; no background task outlives its caller.
+#include "texture/Error.hpp"
 #include "texture/Operation.hpp"
 #include "NeoWxUi.hpp"
 #include <wx/progdlg.h>

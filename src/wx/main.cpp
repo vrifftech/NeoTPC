@@ -8,6 +8,7 @@
 #include "TextureTask.hpp"
 #include "TxiEditor.hpp"
 #include "core/TextureDocument.hpp"
+#include "texture/Error.hpp"
 #include "texture/FileUtil.hpp"
 #include "texture/ParserLimits.hpp"
 #include "texture/Txi.hpp"
@@ -914,7 +915,7 @@ private:
         try {
             const auto sidecar=texture::findTxiSidecar(output);
             return !sidecar || wxui::confirm(this,"Replace output metadata?",
-                wxString("The existing TXI will be replaced or removed to match the new image:\n\n")+wxpath::toWx(*sidecar));
+                "The existing TXI will be replaced or removed to match the new image:\n\n"+texture::pathToUtf8(*sidecar));
         }catch(const std::exception& error){wxui::showError(this,error);return false;}
     }
     bool saveAs() {
@@ -1030,7 +1031,7 @@ private:
         try { document_.validateExportDestination(output); }
         catch(const std::exception& e){wxui::showError(this,e);return;}
         std::error_code ec;
-        if(fs::exists(output,ec) && !wxui::confirm(this,"Replace exported image?",wxpath::toWx(output)))return;
+        if(fs::exists(output,ec) && !wxui::confirm(this,"Replace exported image?",texture::pathToUtf8(output)))return;
         if(!confirmSidecarReplacement(output))return;
         if(texture::kindForExtension(output)==texture::TextureFileKind::Jpeg && document_.texture().hasAlpha &&
             !wxui::confirm(this,"JPEG discards alpha","Export this image without transparency?"))return;

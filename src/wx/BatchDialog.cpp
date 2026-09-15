@@ -499,7 +499,7 @@ void BatchDialog::onConvert() {
     try {
         if (editor_.prepare) confirmation += editor_.prepare(selected);
     } catch (const std::exception& error) { wxui::showError(this, error); return; }
-    if (!confirmation.empty() && !wxui::confirm(this, "Confirm batch conversion", wxui::toWx(confirmation + "Continue?"))) return;
+    if (!confirmation.empty() && !wxui::confirm(this, "Confirm batch conversion", confirmation + "Continue?")) return;
     try {
         TextureBusyGuard busy(nativeBusy_);
         const auto result=runTextureTask(this,"Convert textures",[&](TextureTaskProgress& state) {
