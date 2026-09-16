@@ -18,7 +18,7 @@ namespace layout { class WrappedCheckBox; }
 
 class EncodingOptionsPanel final : public wxPanel {
 public:
-    explicit EncodingOptionsPanel(wxWindow* parent);
+    explicit EncodingOptionsPanel(wxWindow* parent, bool resizeTopLevelOnExpand = false);
 
     void setOptions(const neotpc::texture::TextureSaveOptions& options);
     neotpc::texture::TextureSaveOptions options() const;

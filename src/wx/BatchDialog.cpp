@@ -25,7 +25,6 @@
 #include <wx/panel.h>
 #include <wx/progdlg.h>
 #include <wx/sizer.h>
-#include <wx/scrolwin.h>
 #include <wx/stattext.h>
 #include <wx/textctrl.h>
 #include <wx/weakref.h>
@@ -185,7 +184,7 @@ BatchDialog::BatchDialog(wxWindow* parent, const wxString& initialDirectory, boo
     : wxDialog(parent, wxID_ANY, "Batch Convert Textures", wxDefaultPosition, wxDefaultSize,
                wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER), editor_(std::move(editor)) {
     auto* outer = new wxBoxSizer(wxVERTICAL);
-    auto* form = new layout::ScrolledPage(this);
+    auto* form = new wxPanel(this, wxID_ANY);
     auto* root = new wxBoxSizer(wxVERTICAL);
     auto* intro = new layout::WrappedLabel(form, wxID_ANY,
         "Convert a folder tree while preserving relative paths. Matching TXI sidecars are read automatically; "
@@ -257,7 +256,7 @@ BatchDialog::BatchDialog(wxWindow* parent, const wxString& initialDirectory, boo
 #endif
     root->Add(flags, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(10));
 
-    options_ = new EncodingOptionsPanel(form);
+    options_ = new EncodingOptionsPanel(form, true);
     format_->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) {
         invalidatePlan();
         options_->setTarget(neotpc::texture::kindForExtension(std::filesystem::path("output." + wxui::toStd(format_->GetStringSelection()))));
@@ -282,8 +281,12 @@ BatchDialog::BatchDialog(wxWindow* parent, const wxString& initialDirectory, boo
     if(auto* text=inputDirectory_->GetTextCtrl())text->Bind(wxEVT_TEXT,[inputChanged](wxCommandEvent& e){inputChanged();e.Skip();});
 #endif
 
-    form->SetSizer(root); form->Layout();
-    outer->Add(form,1,wxEXPAND);root=outer;
+    form->SetSizer(root);
+    form->Layout();
+    // Keep the full batch configuration visible. The review table, not the
+    // settings form, absorbs extra or reduced dialog height.
+    outer->Add(form, 0, wxEXPAND);
+    root = outer;
 
 #if defined(__EMSCRIPTEN__)
     browserProgress_ = new wxGauge(this, wxID_ANY, 1, wxDefaultPosition, wxDefaultSize, wxGA_HORIZONTAL);
@@ -291,10 +294,10 @@ BatchDialog::BatchDialog(wxWindow* parent, const wxString& initialDirectory, boo
     root->Add(browserProgress_, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(10));
 #endif
 
-    items_=new wxListCtrl(this,wxID_ANY,wxDefaultPosition,FromDIP(wxSize(720,200)),wxLC_REPORT);
+    items_=new wxListCtrl(this,wxID_ANY,wxDefaultPosition,FromDIP(wxSize(720,170)),wxLC_REPORT);
     wxui::setColumns(*items_,{{"Include",65},{"Source",230},{"Output",230},{"Status",200}});
     items_->SetName("Reviewed batch destinations");
-    items_->SetMinSize(FromDIP(wxSize(1, 160)));
+    items_->SetMinSize(FromDIP(wxSize(1, 120)));
     root->Add(items_,1,wxEXPAND|wxLEFT|wxRIGHT|wxBOTTOM,FromDIP(10));
     auto* selection=new wxWrapSizer(wxHORIZONTAL);
     selection->Add(new wxButton(this,ID_INCLUDE_ROWS,"Include selected"),0,wxRIGHT | wxBOTTOM,FromDIP(6));
@@ -350,7 +353,10 @@ BatchDialog::BatchDialog(wxWindow* parent, const wxString& initialDirectory, boo
     SetSizer(root);
     SetEscapeId(wxID_CLOSE);
     refreshSelectionActions();
-    wxui::configureResponsiveWindow(*this, wxSize(780, 760), wxSize(560, 420));
+    // The old 760-DIP height split the configuration and review areas in
+    // half, which hid Output encoding behind a scrollbar. Size the dialog
+    // for the complete default form and leave resizing to the review table.
+    wxui::configureResponsiveWindow(*this, wxSize(820, 840), wxSize(620, 620));
     CentreOnParent();
     wxui::constrainWindowToDisplay(*this);
     Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { onConvert(); }, ID_CONVERT);

@@ -29,7 +29,7 @@ wxChoice* makeChoice(wxWindow* parent, const std::vector<wxString>& values) {
 
 } // namespace
 
-EncodingOptionsPanel::EncodingOptionsPanel(wxWindow* parent)
+EncodingOptionsPanel::EncodingOptionsPanel(wxWindow* parent, bool resizeTopLevelOnExpand)
     : wxPanel(parent) {
     SetMinSize(wxSize(1, -1));
     auto* outer = new layout::GroupSizer(this, "Output encoding");
@@ -37,7 +37,10 @@ EncodingOptionsPanel::EncodingOptionsPanel(wxWindow* parent)
 
     compression_ = makeChoice(this, {"auto", "none", "grey", "dxt1", "dxt3", "dxt5"});
     ddsDialect_ = makeChoice(this, {"Preserve source / game for new DDS", "Game DDS (BioWare)", "Standard DDS (interchange)"});
-    auto* advanced = new wxCollapsiblePane(this, wxID_ANY, "Advanced encoding", wxDefaultPosition, wxDefaultSize, wxCP_DEFAULT_STYLE | wxCP_NO_TLW_RESIZE);
+    long advancedStyle = wxCP_DEFAULT_STYLE;
+    if (!resizeTopLevelOnExpand) advancedStyle |= wxCP_NO_TLW_RESIZE;
+    auto* advanced = new wxCollapsiblePane(this, wxID_ANY, "Advanced encoding",
+                                           wxDefaultPosition, wxDefaultSize, advancedStyle);
     advanced_ = advanced;
     auto* details = advanced->GetPane();
     auto* detailsSizer = new wxBoxSizer(wxVERTICAL);
