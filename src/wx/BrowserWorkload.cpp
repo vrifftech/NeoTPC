@@ -28,6 +28,7 @@ std::map<std::uint32_t, std::shared_ptr<PendingRead>>& pendingReads() {
     return value;
 }
 
+#if defined(__EMSCRIPTEN__)
 std::uint32_t nextRequestId() {
     static std::uint32_t next = 0;
     auto& pending = pendingReads();
@@ -38,6 +39,7 @@ std::uint32_t nextRequestId() {
     }
     return 0;
 }
+#endif
 
 void deliver(RetainedReadCallback callback, RetainedReadResult result) {
     if (!callback) return;

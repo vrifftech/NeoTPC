@@ -22,7 +22,6 @@
 #include "NeoGameDirectoryMenu.hpp"
 
 #include <wx/aboutdlg.h>
-#include <wx/artprov.h>
 #include <wx/choice.h>
 #include <wx/choicdlg.h>
 #include <wx/checkbox.h>
@@ -39,7 +38,6 @@
 #include <wx/statbox.h>
 #include <wx/tglbtn.h>
 #include <wx/timer.h>
-#include <wx/toolbar.h>
 #include <wx/wx.h>
 #include <wx/wrapsizer.h>
 
@@ -448,18 +446,17 @@ private:
         file->Append(wxID_OPEN, "&Open...\tCtrl+O");
         recentFilesMenu_ = new wxMenu();
         file->AppendSubMenu(recentFilesMenu_, "Open &Recent");
+        file->AppendSeparator();
+        file->Append(wxID_SAVE, "&Save\tCtrl+S");
+        file->Append(ID_SAVE_AS, "Save &As (preserve format)...\tCtrl+Shift+S");
+        file->Append(ID_EXPORT_IMAGE, "Export / Convert...\tCtrl+E");
+        file->AppendSeparator();
         file->Append(ID_COMPARE_IMAGES, "&Compare images...\tCtrl+Shift+O");
         file->Append(ID_OPEN_CONFLICTS, "Find same-name variants");
         file->Append(ID_CLOSE_CONFLICTS, "Close Image Comparison");
-        file->Append(wxID_SAVE, "&Save\tCtrl+S");
-        file->Append(ID_SAVE_AS, "Save &As (preserve format)...\tCtrl+Shift+S");
         file->AppendSeparator();
         file->Append(ID_SPLIT_TPC, "Split TPC into TGA + TXI...");
         file->Append(ID_COMBINE_TGA_TXI, "Combine TGA + TXI into TPC...");
-        file->AppendSeparator();
-        file->Append(ID_IMPORT_TXI, "Import TXI...");
-        file->Append(ID_EXPORT_TXI, "Export TXI...");
-        file->AppendSeparator();
         file->Append(ID_BATCH_CONVERT, "&Batch Convert...");
         file->AppendSeparator();
         file->Append(ID_CLOSE_TEXTURE, "&Close Texture\tCtrl+W");
@@ -469,7 +466,6 @@ private:
             });
         file->AppendSeparator();
         file->Append(wxID_EXIT, "E&xit\tAlt+F4");
-        file->Insert(3,ID_EXPORT_IMAGE,"Export / Convert...\tCtrl+E");
         menuBar->Append(file, "&File");
         auto* edit=new wxMenu();
         edit->Append(wxID_UNDO,"Undo texture change\tCtrl+Z");
@@ -501,27 +497,13 @@ private:
         menuBar->Append(tools, "&Tools");
 
         auto* help = new wxMenu();
-        help->Append(ID_TXI_DICTIONARY, "TXI &dictionary...");
+        help->Append(ID_TXI_DICTIONARY, "TXI &Reference");
         help->AppendSeparator();
         help->Append(wxID_ABOUT, "&About NeoTPC");
         menuBar->Append(help, "&Help");
         SetMenuBar(menuBar);
 
-        auto* toolbar = CreateToolBar(wxTB_FLAT | wxTB_HORIZONTAL | wxTB_NODIVIDER | wxTB_TEXT);
-        toolbar->AddTool(wxID_OPEN, "Open", wxArtProvider::GetBitmap(wxART_FILE_OPEN, wxART_TOOLBAR));
-        toolbar->AddTool(wxID_SAVE, "Save", wxArtProvider::GetBitmap(wxART_FILE_SAVE, wxART_TOOLBAR));
-        toolbar->AddTool(ID_EXPORT_IMAGE, "Export", wxArtProvider::GetBitmap(wxART_FILE_SAVE_AS, wxART_TOOLBAR));
-        toolbar->AddTool(ID_BATCH_CONVERT, "Batch", wxArtProvider::GetBitmap(wxART_FOLDER, wxART_TOOLBAR));
-        toolbar->AddSeparator();
-        toolbar->AddTool(ID_FIT_IMAGE, "Fit", wxArtProvider::GetBitmap(wxART_FIND, wxART_TOOLBAR));
-        toolbar->SetToolShortHelp(wxID_OPEN, "Open a texture or TXI document (Ctrl+O)");
-        toolbar->SetToolShortHelp(wxID_SAVE, "Save document edits; separate export settings are not applied (Ctrl+S)");
-        toolbar->SetToolShortHelp(ID_EXPORT_IMAGE, "Choose a format and destination for a separate copy (Ctrl+E)");
-        toolbar->SetToolShortHelp(ID_BATCH_CONVERT, "Scan and review a folder before converting");
-        toolbar->SetToolShortHelp(ID_FIT_IMAGE, "Fit all preview panes to their available space (Ctrl+0)");
-        toolbar->Realize();
-
-        Bind(wxEVT_MENU, [this](wxCommandEvent&) { showTxiDictionary(); }, ID_TXI_DICTIONARY);
+        Bind(wxEVT_MENU, [this](wxCommandEvent&) { showReferencePage(); }, ID_TXI_DICTIONARY);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { chooseOpen(); }, wxID_OPEN);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { save(); }, wxID_SAVE);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { saveAs(); }, ID_SAVE_AS);
@@ -530,8 +512,6 @@ private:
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { undoRedo(true); }, wxID_REDO);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { splitTpc(); }, ID_SPLIT_TPC);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { combineTgaTxi(); }, ID_COMBINE_TGA_TXI);
-        Bind(wxEVT_MENU, [this](wxCommandEvent&) { importTxi(); }, ID_IMPORT_TXI);
-        Bind(wxEVT_MENU, [this](wxCommandEvent&) { exportTxi(); }, ID_EXPORT_TXI);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { showBatch(); }, ID_BATCH_CONVERT);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { openConflictingImages(); }, ID_OPEN_CONFLICTS);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { compareImages(); }, ID_COMPARE_IMAGES);
@@ -558,11 +538,6 @@ private:
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { flipHorizontal(); }, ID_FLIP_HORIZONTAL);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { flipVertical(); }, ID_FLIP_VERTICAL);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { showAbout(); }, wxID_ABOUT);
-        Bind(wxEVT_TOOL, [this](wxCommandEvent&) { chooseOpen(); }, wxID_OPEN);
-        Bind(wxEVT_TOOL, [this](wxCommandEvent&) { save(); }, wxID_SAVE);
-        Bind(wxEVT_TOOL, [this](wxCommandEvent&) { showExportPage(); }, ID_EXPORT_IMAGE);
-        Bind(wxEVT_TOOL, [this](wxCommandEvent&) { showBatch(); }, ID_BATCH_CONVERT);
-        Bind(wxEVT_TOOL, [this](wxCommandEvent&) { applyToPreviewCanvases([](auto& canvas) { canvas.fitImage(); }); refreshStatus(); }, ID_FIT_IMAGE);
         refreshRecentFiles();
     }
 
@@ -790,9 +765,6 @@ private:
         samplingChoice_->Bind(wxEVT_CHOICE,[this](wxCommandEvent&){applyToPreviewCanvases([this](auto& c){c.setSmooth(samplingChoice_->GetSelection()==1);});});
         gridChoice_->Bind(wxEVT_CHOICE,[this](wxCommandEvent&){applyToPreviewCanvases([this](auto& c){c.setGrid(static_cast<TextureCanvas::Grid>(gridChoice_->GetSelection()));});});
         previewBox->Add(previewFields, 0, wxEXPAND | wxALL, FromDIP(8));
-        conflictButton_ = new wxButton(page, ID_COMPARE_IMAGES, "Compare images...");
-        conflictButton_->SetToolTip("Choose images to compare. File > Find same-name variants searches the current directory instead.");
-        previewBox->Add(conflictButton_, 0, wxALIGN_RIGHT | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(8));
         root->Add(previewBox, 0, wxEXPAND | wxALL, FromDIP(8));
 
         imageInfo_ = new layout::WrappedLabel(page, wxID_ANY, "Open a texture to view its dimensions and format.");
@@ -808,17 +780,6 @@ private:
 
         Bind(wxEVT_BUTTON,[this](wxCommandEvent&){stepFrame(-1);},ID_PREVIOUS_FRAME);
         Bind(wxEVT_BUTTON,[this](wxCommandEvent&){stepFrame(1);},ID_NEXT_FRAME);
-        auto* transforms = new layout::GroupSizer(page, "Pixel operations");
-        auto* transformGrid = new wxWrapSizer(wxHORIZONTAL);
-        transformGrid->Add(new wxButton(page, ID_SET_ALPHA, "Set alpha..."), 0, wxRIGHT | wxBOTTOM, FromDIP(6));
-        transformGrid->Add(new wxButton(page, ID_INVERT_ALPHA, "Invert alpha"), 0, wxRIGHT | wxBOTTOM, FromDIP(6));
-        transformGrid->Add(new wxButton(page, ID_FLIP_HORIZONTAL, "Flip horizontally"), 0, wxRIGHT | wxBOTTOM, FromDIP(6));
-        transformGrid->Add(new wxButton(page, ID_FLIP_VERTICAL, "Flip vertically"), 0, wxRIGHT | wxBOTTOM, FromDIP(6));
-        transforms->Add(transformGrid, 0, wxEXPAND | wxALL, FromDIP(8));
-        auto* transformHint = new layout::WrappedLabel(page, wxID_ANY,
-            "Changes apply to the document's pixels, not just the displayed channel or frame. Undo restores the previous state.");
-        transforms->Add(transformHint, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(8));
-        root->Add(transforms, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(8));
         root->AddStretchSpacer();
         page->SetSizer(root);
         page->FitInside();
@@ -828,11 +789,6 @@ private:
         mipChoice_->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) { refreshPreview(); });
         previewMode_->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) { refreshPreview(); });
         playButton_->Bind(wxEVT_TOGGLEBUTTON, [this](wxCommandEvent&) { setAnimationPlaying(playButton_->GetValue()); });
-        Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { setAlpha(); }, ID_SET_ALPHA);
-        Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { invertAlpha(); }, ID_INVERT_ALPHA);
-        Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { flipHorizontal(); }, ID_FLIP_HORIZONTAL);
-        Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { flipVertical(); }, ID_FLIP_VERTICAL);
-        Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { compareImages(); }, ID_COMPARE_IMAGES);
     }
 
     void buildExportPage() {
@@ -915,8 +871,6 @@ private:
         txiButtons->Add(new wxButton(page, ID_IMPORT_TXI, "Import TXI..."), 0, wxRIGHT | wxBOTTOM, FromDIP(6));
         txiButtons->Add(new wxButton(page, ID_EXPORT_TXI, "Export TXI..."), 0, wxRIGHT | wxBOTTOM, FromDIP(6));
         txiButtons->Add(new wxButton(page, ID_COMMON_TXI, "Common values..."), 0, wxRIGHT | wxBOTTOM, FromDIP(6));
-        txiButtons->Add(new wxButton(page, ID_TXI_DICTIONARY, "Dictionary..."), 0, wxBOTTOM, FromDIP(6));
-        Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { showTxiDictionary(); }, ID_TXI_DICTIONARY);
         Bind(wxEVT_BUTTON,[this](wxCommandEvent&){editCommonTxi();},ID_COMMON_TXI);
         root->Add(txiButtons, 0, wxEXPAND | wxALL, FromDIP(8));
         txiSummary_ = new layout::WrappedLabel(page, wxID_ANY, "No TXI metadata");
@@ -925,8 +879,8 @@ private:
         txiIssues_->setJumpHandler([this](std::size_t line) { txiEditor_->goToOneBasedLine(line); });
         txiIssues_->setLookupHandler([this](const std::string& key) {
             catalog_->selectDirective(key);
-            notebook_->SetSelection(3);
-            notebook_->GetPage(3)->Layout();
+            showReferencePage();
+            if (referencePage_ != nullptr) referencePage_->Layout();
         });
         root->Add(txiIssues_, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(8));
         page->SetSizer(root);
@@ -954,15 +908,23 @@ private:
 
     void buildCatalogPage() {
         auto* page = new layout::ScrolledPage(notebook_);
+        referencePage_ = page;
         auto* root = new wxBoxSizer(wxVERTICAL);
-        auto* larger = new wxButton(page, wxID_ANY, "Larger view...");
-        larger->SetToolTip("Open the same dictionary in a resizable window.");
+        auto* larger = new wxButton(page, wxID_ANY, "Open larger reference...");
+        larger->SetToolTip("Open the TXI reference in a separate window.");
         larger->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { showTxiDictionary(); });
         root->Add(larger, 0, wxALL, FromDIP(8));
         catalog_ = new TxiDictionaryPanel(page);
         root->Add(catalog_, 1, wxEXPAND);
         page->SetSizer(root);
         notebook_->AddPage(page, "Reference", false);
+    }
+
+    void showReferencePage() {
+        if (busy_ || referencePage_ == nullptr || notebook_ == nullptr) return;
+        const int index = notebook_->FindPage(referencePage_);
+        if (index != wxNOT_FOUND) notebook_->SetSelection(static_cast<std::size_t>(index));
+        if (catalog_ != nullptr) catalog_->focusSearch();
     }
 
     void showTxiDictionary() {
@@ -2322,15 +2284,9 @@ private:
         if (txiEditor_ != nullptr) txiEditor_->Enable(open);
         if (auto* importButton = FindWindow(ID_IMPORT_TXI)) importButton->Enable(open);
         if (auto* exportButton = FindWindow(ID_EXPORT_TXI)) exportButton->Enable(open);
-        if (conflictButton_ != nullptr) conflictButton_->Enable(open && !comparisonLoading);
         for (int id : {ID_FIT_IMAGE, ID_ACTUAL_SIZE, ID_ZOOM_IN, ID_ZOOM_OUT,
                        ID_SET_ALPHA, ID_SCALE_ALPHA, ID_INVERT_ALPHA, ID_FLIP_HORIZONTAL, ID_FLIP_VERTICAL}) {
             GetMenuBar()->Enable(id, id == ID_FIT_IMAGE || id == ID_ACTUAL_SIZE || id == ID_ZOOM_IN || id == ID_ZOOM_OUT ? previewPixels : pixels);
-        }
-        if (auto* toolbar = GetToolBar()) {
-            toolbar->EnableTool(wxID_SAVE, sourceWritable && document_.dirty());
-            toolbar->EnableTool(ID_FIT_IMAGE, previewPixels);
-            toolbar->EnableTool(ID_EXPORT_IMAGE,open);
         }
         // Labels and visible transport controls can change without a size event.
         if (auto* page = notebook_->GetCurrentPage()) page->Layout();
@@ -2492,12 +2448,12 @@ private:
     std::vector<std::pair<wxSplitterWindow*, bool>> comparisonSplitters_;
     wxNotebook* notebook_ = nullptr;
     wxScrolledWindow* exportPage_ = nullptr;
+    wxScrolledWindow* referencePage_ = nullptr;
     wxStaticText* sourceLabel_ = nullptr;
     wxChoice* layerChoice_ = nullptr;
     wxChoice* mipChoice_ = nullptr;
     wxToggleButton* playButton_ = nullptr;
     wxChoice* previewMode_ = nullptr;
-    wxButton* conflictButton_ = nullptr;
     wxTextCtrl* summary_ = nullptr;
     EncodingOptionsPanel* optionsPanel_ = nullptr;
     wxStaticText* txiHelp_ = nullptr;

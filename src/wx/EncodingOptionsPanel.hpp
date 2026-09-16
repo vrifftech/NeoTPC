@@ -9,7 +9,6 @@
 #include <vector>
 
 class wxCheckBox;
-class wxCollapsiblePane;
 class wxChoice;
 class wxSpinCtrl;
 class wxSpinCtrlDouble;
@@ -31,7 +30,7 @@ private:
     void updateControls();
     void showRow(wxWindow* control, bool visible);
     std::vector<std::pair<wxWindow*, wxWindow*>> rows_;
-    wxCollapsiblePane* advanced_ = nullptr;
+    wxWindow* advanced_ = nullptr;
 
     wxChoice* compression_ = nullptr;
     wxChoice* ddsDialect_ = nullptr;
