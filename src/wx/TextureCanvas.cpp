@@ -11,6 +11,8 @@ TextureCanvas::TextureCanvas(wxWindow* parent):wxPanel(parent,wxID_ANY,wxDefault
     Bind(wxEVT_LEFT_UP,&TextureCanvas::onLeftUp,this);Bind(wxEVT_MOTION,&TextureCanvas::onMotion,this);
     Bind(wxEVT_LEFT_DCLICK,&TextureCanvas::onDoubleClick,this);
     Bind(wxEVT_MOUSE_CAPTURE_LOST,[this](wxMouseCaptureLostEvent&){dragging_=false;SetCursor(wxNullCursor);});
+    SetToolTip("Wheel: zoom at pointer. Drag: pan. Double-click: fit / 100%. When focused: + / - zoom, 0 fits, 1 shows actual pixels, arrow keys pan.");
+    Bind(wxEVT_KEY_DOWN, &TextureCanvas::onKeyDown, this);
     Bind(wxEVT_SET_FOCUS,[this](wxFocusEvent& e){Refresh(false);e.Skip();});
     Bind(wxEVT_KILL_FOCUS,[this](wxFocusEvent& e){Refresh(false);e.Skip();});
 }
@@ -66,6 +68,29 @@ void TextureCanvas::onPaint(wxPaintEvent&){
     }
     if(HasFocus()){dc.SetPen(wxPen(wxColour(120,170,215),FromDIP(1)));dc.SetBrush(*wxTRANSPARENT_BRUSH);dc.DrawRectangle(0,0,c.x,c.y);}
 }
+void TextureCanvas::onKeyDown(wxKeyEvent& event) {
+    if (!hasImage() || event.CmdDown() || event.ControlDown() || event.AltDown()) { event.Skip(); return; }
+    const int key = event.GetKeyCode();
+    switch (key) {
+    case '+': case '=': case WXK_NUMPAD_ADD: zoomIn(); return;
+    case '-': case WXK_NUMPAD_SUBTRACT: zoomOut(); return;
+    case '0': fitImage(); return;
+    case '1': actualSize(); return;
+    default: break;
+    }
+    if (key != WXK_LEFT && key != WXK_RIGHT && key != WXK_UP && key != WXK_DOWN) {
+        event.Skip(); return;
+    }
+    const double scale = displayScale();
+    if (view_.fit) { view_.fit = false; view_.zoom = scale; view_.centerX = .5; view_.centerY = .5; }
+    const double step = FromDIP(event.ShiftDown() ? 128 : 32);
+    if (key == WXK_LEFT) view_.centerX -= step / (scale * image_.GetWidth());
+    if (key == WXK_RIGHT) view_.centerX += step / (scale * image_.GetWidth());
+    if (key == WXK_UP) view_.centerY -= step / (scale * image_.GetHeight());
+    if (key == WXK_DOWN) view_.centerY += step / (scale * image_.GetHeight());
+    changed();
+}
+
 void TextureCanvas::onSize(wxSizeEvent&e){Refresh(false);e.Skip();}
 void TextureCanvas::zoomBy(double factor,const wxPoint& anchor){
     if(!hasImage())return;const double old=displayScale();const auto p=origin(old);const auto c=GetClientSize();

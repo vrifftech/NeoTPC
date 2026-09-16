@@ -197,6 +197,8 @@ if(NEOTPC_BUILD_WX_GUI)
             src/wx/BrowserWorkload.cpp
             src/wx/EncodingOptionsPanel.cpp
             src/wx/TextureCanvas.cpp
+            src/wx/TxiDictionaryPanel.cpp
+            src/wx/TxiDiagnosticsPanel.cpp
             src/wx/TxiEditor.cpp
             src/wx/main.cpp
         )

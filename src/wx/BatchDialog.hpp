@@ -23,6 +23,7 @@ class wxStaticText;
 class wxTextCtrl;
 
 namespace neotpc {
+namespace layout { class WrappedCheckBox; class WrappedLabel; }
 
 class EncodingOptionsPanel;
 
@@ -57,6 +58,8 @@ private:
     void showRows(const std::vector<texture::BatchItemResult>& rows, bool selectReady);
     void setSelectedRows(bool include);
     void refreshPlanCount();
+    void refreshSelectionActions();
+    void showSelectedDetails();
     bool acceptsInput(const std::filesystem::path& input) const;
     std::optional<texture::BatchPlan> plan_;
     std::vector<texture::BatchItemResult> displayedRows_;
@@ -65,7 +68,7 @@ private:
     wxChoice* inputType_ = nullptr;
     wxChoice* matchingFormat_ = nullptr;
     wxButton* scanButton_ = nullptr;
-    wxStaticText* resultSummary_ = nullptr;
+    layout::WrappedLabel* resultSummary_ = nullptr;
     bool outputChosen_ = false;
     bool updatingOutput_ = false;
     bool planReady_ = false;
@@ -101,8 +104,8 @@ private:
 #endif
     wxDirPickerCtrl* outputDirectory_ = nullptr;
     wxChoice* format_ = nullptr;
-    wxCheckBox* recursive_ = nullptr;
-    wxCheckBox* overwrite_ = nullptr;
+    layout::WrappedCheckBox* recursive_ = nullptr;
+    layout::WrappedCheckBox* overwrite_ = nullptr;
     EncodingOptionsPanel* options_ = nullptr;
     wxTextCtrl* report_ = nullptr;
     wxButton* convertButton_ = nullptr;

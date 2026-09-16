@@ -6,13 +6,16 @@
 
 #include <functional>
 #include <utility>
+#include <vector>
 
 class wxCheckBox;
+class wxCollapsiblePane;
 class wxChoice;
 class wxSpinCtrl;
 class wxSpinCtrlDouble;
 
 namespace neotpc {
+namespace layout { class WrappedCheckBox; }
 
 class EncodingOptionsPanel final : public wxPanel {
 public:
@@ -26,12 +29,15 @@ public:
 private:
     void notifyChanged();
     void updateControls();
+    void showRow(wxWindow* control, bool visible);
+    std::vector<std::pair<wxWindow*, wxWindow*>> rows_;
+    wxCollapsiblePane* advanced_ = nullptr;
 
     wxChoice* compression_ = nullptr;
     wxChoice* ddsDialect_ = nullptr;
     wxChoice* dxtQuality_ = nullptr;
     wxChoice* dxtMetric_ = nullptr;
-    wxCheckBox* weightAlpha_ = nullptr;
+    layout::WrappedCheckBox* weightAlpha_ = nullptr;
     wxSpinCtrl* dxt1Threshold_ = nullptr;
     wxSpinCtrl* jpegQuality_ = nullptr;
     wxChoice* mipmaps_ = nullptr;
@@ -39,9 +45,9 @@ private:
     wxChoice* mipColor_ = nullptr;
     neotpc::texture::TextureFileKind target_ = neotpc::texture::TextureFileKind::Tpc;
     neotpc::texture::DdsDialect sourceDialect_ = neotpc::texture::DdsDialect::Auto;
-    wxCheckBox* bicubic_ = nullptr;
-    wxCheckBox* flipX_ = nullptr;
-    wxCheckBox* flipY_ = nullptr;
+    layout::WrappedCheckBox* bicubic_ = nullptr;
+    layout::WrappedCheckBox* flipX_ = nullptr;
+    layout::WrappedCheckBox* flipY_ = nullptr;
     wxSpinCtrlDouble* alphaBlending_ = nullptr;
     std::function<void()> changeHandler_;
     bool loading_ = false;

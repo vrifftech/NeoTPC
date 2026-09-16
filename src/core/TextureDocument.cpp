@@ -1,4 +1,5 @@
 #include "core/TextureDocument.hpp"
+#include "core/TextureWorkflow.hpp"
 #include "texture/Error.hpp"
 #include "texture/FileUtil.hpp"
 #include "texture/Txi.hpp"
@@ -248,6 +249,14 @@ TexturePreview TextureDocument::preview(const std::filesystem::path& output, con
         throw TextureError(result.decoded.compatibilityWarnings.front());
     return result;
 }
+bool TextureDocument::previewMatches(const std::filesystem::path& output,
+                                     const texture::TextureSaveOptions& options,
+                                     const TexturePreview& staged) const {
+    const auto kind = texture::kindForExtension(output);
+    return open_ && staged.revision == revision_ && staged.outputKind == kind &&
+        texture::sameEncodingOptions(staged.options, options, kind, texture_);
+}
+
 void TextureDocument::commitPreview(const std::filesystem::path& output, const TexturePreview& staged, bool adopt) {
     using namespace texture;
     if (!open_ || staged.revision != revision_ || staged.outputKind != kindForExtension(output))
@@ -278,6 +287,10 @@ void TextureDocument::commitPreview(const std::filesystem::path& output, const T
 }
 void TextureDocument::saveTo(const std::filesystem::path& output) {
     if (!open_ || output.empty()) throw texture::TextureError("No texture or output path selected");
+    if (!workflow::writableFormat(texture_.kind))
+        throw texture::TextureError("This source format is read-only. Use Export / Convert to write a supported format.");
+    if (texture::kindForExtension(output) != texture_.kind)
+        throw texture::TextureError("Save preserves the detected source format. Use Save As with its correct extension, or Export / Convert for another format.");
     if (samePath(output, path_)) {
         requireSourceUnchanged();
         if (!dirty()) { finishEditGroup(); return; }
@@ -292,8 +305,7 @@ std::string TextureDocument::exportSummary(const std::filesystem::path& output, 
     if (!open_) return "Open a texture first.";
     const auto kind = texture::kindForExtension(output);
     const auto issue = outputIssue(output, opts);
-    const bool stagedValid = staged && staged->revision == revision() && staged->outputKind == kind &&
-        texture::sameEncodingOptions(staged->options, opts, kind, texture());
+    const bool stagedValid = staged && previewMatches(output, opts, *staged);
     const bool preserved = outputPreservesImage(output, opts);
     const auto* result = stagedValid ? &staged->decoded : (preserved ? &texture() : nullptr);
     std::string text = "Output: " + texture::pathToUtf8(output) + "\n";
@@ -317,6 +329,8 @@ std::string TextureDocument::exportSummary(const std::filesystem::path& output, 
         text += result ? " | " + result->sourceEncoding : (kind == texture::TextureFileKind::Jpeg ? " | JPEG (lossy)" : " | Uncompressed/lossless image");
         text += " | base image only";
     }
+    if (kind == texture::TextureFileKind::Jpeg && texture_.hasAlpha)
+        text += "\nJPEG discards alpha, including transparency or mask data.";
     if (texture::usesTxiSidecar(output)) {
         auto txi = output; txi.replace_extension(".txi");
         text += "\nTXI companion";
@@ -341,7 +355,9 @@ std::string TextureDocument::summary() const {
     std::ostringstream out;
     out << texture::textureSummary(texture_);
     if (layoutPending()) out << "\nLAYOUT CHANGES PENDING: the left preview shows the loaded layout. Use Preview output to validate the proposed layout.\n";
-    if (!dirty()) out << "\nSave preserves the original encoded bytes. Export settings are separate.\n";
+    if (!workflow::writableFormat(texture_.kind)) out << "\nRead-only source format. Export to a supported format to preserve edits.\n";
+    else if (!workflow::canSaveInPlace(texture_.kind, path_)) out << "\nThe filename does not match the detected format. Save As requires a matching extension.\n";
+    else if (!dirty()) out << "\nSave preserves the original encoded bytes. Export settings are separate.\n";
     else if (canPatchEmbeddedTxi()) out << "\nTXI-only save preserves the encoded image.\n";
     else if (contentDirty_ || optionsDirty_) out << "\nSaving requires an image encode; compressed formats may change pixels.\n";
     return out.str();

@@ -4,6 +4,7 @@
 #include "EncodingOptionsPanel.hpp"
 #include "TextureTask.hpp"
 #include "PathUtils.hpp"
+#include "ResponsiveLayout.hpp"
 #include "texture/BatchConverter.hpp"
 #include "texture/Error.hpp"
 #include "texture/FileUtil.hpp"
@@ -28,6 +29,7 @@
 #include <wx/stattext.h>
 #include <wx/textctrl.h>
 #include <wx/weakref.h>
+#include <wx/wrapsizer.h>
 
 #include <algorithm>
 #include <exception>
@@ -54,7 +56,7 @@ namespace {
 
 enum : int {
     ID_CONVERT = wxID_HIGHEST + 470,
-    ID_SELECT_BROWSER_INPUT, ID_SCAN, ID_INCLUDE_ROWS, ID_EXCLUDE_ROWS, ID_SHOW_OUTPUT,
+    ID_SELECT_BROWSER_INPUT, ID_SCAN, ID_INCLUDE_ROWS, ID_EXCLUDE_ROWS, ID_SHOW_OUTPUT, ID_ROW_DETAILS,
 };
 
 #if defined(__EMSCRIPTEN__)
@@ -183,34 +185,35 @@ BatchDialog::BatchDialog(wxWindow* parent, const wxString& initialDirectory, boo
     : wxDialog(parent, wxID_ANY, "Batch Convert Textures", wxDefaultPosition, wxDefaultSize,
                wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER), editor_(std::move(editor)) {
     auto* outer = new wxBoxSizer(wxVERTICAL);
-    auto* form = new wxScrolledWindow(this,wxID_ANY,wxDefaultPosition,wxDefaultSize,wxVSCROLL);
+    auto* form = new layout::ScrolledPage(this);
     auto* root = new wxBoxSizer(wxVERTICAL);
-    auto* intro = new wxStaticText(form, wxID_ANY,
+    auto* intro = new layout::WrappedLabel(form, wxID_ANY,
         "Convert a folder tree while preserving relative paths. Matching TXI sidecars are read automatically; "
         "TPC output embeds TXI and other image outputs write sidecars.");
-    intro->Wrap(FromDIP(700));
     root->Add(intro, 0, wxEXPAND | wxALL, FromDIP(10));
 
-    auto* paths = new wxFlexGridSizer(2, FromDIP(7), FromDIP(10));
-    paths->AddGrowableCol(1, 1);
-    paths->Add(new wxStaticText(form, wxID_ANY, "Input folder"), 0, wxALIGN_CENTER_VERTICAL);
+    auto* paths = new wxBoxSizer(wxVERTICAL);
+    auto addPathField = [form, paths](const wxString& caption, wxWindow* control) {
+        control->SetMinSize(form->FromDIP(wxSize(180, -1)));
+        paths->Add(layout::fieldRow(form, caption, control), 0, wxEXPAND);
+    };
 #if defined(__EMSCRIPTEN__)
     auto* inputRow = new wxPanel(form, wxID_ANY);
-    auto* inputSizer = new wxBoxSizer(wxHORIZONTAL);
+    auto* inputSizer = new wxWrapSizer(wxHORIZONTAL);
     inputDirectory_ = new wxTextCtrl(inputRow, wxID_ANY, "No browser folder selected",
                                      wxDefaultPosition, wxDefaultSize, wxTE_READONLY);
     inputBrowse_ = new wxButton(inputRow, ID_SELECT_BROWSER_INPUT, "Browse...");
-    inputSizer->Add(inputDirectory_, 1, wxEXPAND | wxRIGHT, FromDIP(6));
+    inputDirectory_->SetMinSize(FromDIP(wxSize(180, -1)));
+    inputSizer->Add(inputDirectory_, 1, wxEXPAND | wxRIGHT | wxBOTTOM, FromDIP(6));
     inputSizer->Add(inputBrowse_, 0, wxEXPAND);
     inputRow->SetSizer(inputSizer);
-    paths->Add(inputRow, 1, wxEXPAND);
+    addPathField("Input folder", inputRow);
 #else
     inputDirectory_ = new wxDirPickerCtrl(form, wxID_ANY, initialDirectory, "Choose input folder",
                                           wxDefaultPosition, wxDefaultSize,
                                           wxDIRP_USE_TEXTCTRL | wxDIRP_DIR_MUST_EXIST);
-    paths->Add(inputDirectory_, 1, wxEXPAND);
+    addPathField("Input folder", inputDirectory_);
 #endif
-    paths->Add(new wxStaticText(form, wxID_ANY, "Output folder"), 0, wxALIGN_CENTER_VERTICAL);
     wxString output;
 #if !defined(__EMSCRIPTEN__)
     output = initialDirectory;
@@ -221,40 +224,38 @@ BatchDialog::BatchDialog(wxWindow* parent, const wxString& initialDirectory, boo
 #endif
     outputDirectory_ = new wxDirPickerCtrl(form, wxID_ANY, output, "Choose output folder",
                                            wxDefaultPosition, wxDefaultSize, wxDIRP_USE_TEXTCTRL);
-    paths->Add(outputDirectory_, 1, wxEXPAND);
-    paths->Add(new wxStaticText(form, wxID_ANY, "Output format"), 0, wxALIGN_CENTER_VERTICAL);
+    addPathField("Output folder", outputDirectory_);
     format_ = new wxChoice(form, wxID_ANY);
     for (const char* value : {"tpc", "tga", "dds", "png", "jpg", "bmp", "txi"}) format_->Append(value);
     format_->SetSelection(0);
-    paths->Add(format_, 1, wxEXPAND);
-    paths->Add(new wxStaticText(form, wxID_ANY, "Input type"), 0, wxALIGN_CENTER_VERTICAL);
+    addPathField("Output format", format_);
     inputType_ = new wxChoice(form, wxID_ANY);
     for(const char* value:{"All supported","tpc","txb","tga","dds","png","jpg","bmp","txi"}) inputType_->Append(value);
-    inputType_->SetSelection(0);paths->Add(inputType_,1,wxEXPAND);
-    paths->Add(new wxStaticText(form, wxID_ANY, "Matching output-format inputs"), 0, wxALIGN_CENTER_VERTICAL);
+    inputType_->SetSelection(0);
+    addPathField("Input type", inputType_);
     matchingFormat_ = new wxChoice(form, wxID_ANY);
     matchingFormat_->Append("Preserve original file (no recompression)");
     matchingFormat_->Append("Re-encode using selected settings");
     matchingFormat_->SetSelection(0);
     matchingFormat_->SetToolTip("Preserve copies a matching container/dialect exactly, including its mip levels and TXI. Encoding controls then apply only to format/dialect conversions. Choose Re-encode to apply them to all selected inputs.");
     matchingFormat_->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) { invalidatePlan(); });
-    paths->Add(matchingFormat_, 1, wxEXPAND);
+    addPathField("Matching inputs", matchingFormat_);
     root->Add(paths, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(10));
-    auto* policyNote = new wxStaticText(form, wxID_ANY,
+    auto* policyNote = new layout::WrappedLabel(form, wxID_ANY,
         "Preserve copies matching containers/dialects exactly. Encoding controls apply only to conversions; choose Re-encode to rebuild matching files.");
-    policyNote->Wrap(FromDIP(700)); root->Add(policyNote, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(10));
+    root->Add(policyNote, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(10));
 
-    auto* flags = new wxBoxSizer(wxHORIZONTAL);
-    recursive_ = new wxCheckBox(form, wxID_ANY, "Include subfolders");
+    auto* flags = new wxBoxSizer(wxVERTICAL);
+    recursive_ = new layout::WrappedCheckBox(form, "Include subfolders");
     recursive_->SetValue(true);
-    overwrite_ = new wxCheckBox(form, wxID_ANY, "Overwrite existing outputs");
-    flags->Add(recursive_, 0, wxRIGHT, FromDIP(16));
-    flags->Add(overwrite_);
+    overwrite_ = new layout::WrappedCheckBox(form, "Overwrite existing outputs");
+    flags->Add(recursive_, 0, wxEXPAND | wxBOTTOM, FromDIP(6));
+    flags->Add(overwrite_, 0, wxEXPAND);
 #if defined(__EMSCRIPTEN__)
     overwrite_->SetValue(false);overwrite_->Disable();
     overwrite_->SetLabel("Browser: new files in an empty output folder only");
 #endif
-    root->Add(flags, 0, wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(10));
+    root->Add(flags, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(10));
 
     options_ = new EncodingOptionsPanel(form);
     format_->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) {
@@ -281,7 +282,7 @@ BatchDialog::BatchDialog(wxWindow* parent, const wxString& initialDirectory, boo
     if(auto* text=inputDirectory_->GetTextCtrl())text->Bind(wxEVT_TEXT,[inputChanged](wxCommandEvent& e){inputChanged();e.Skip();});
 #endif
 
-    form->SetSizer(root);form->SetScrollRate(0,FromDIP(12));form->FitInside();
+    form->SetSizer(root); form->Layout();
     outer->Add(form,1,wxEXPAND);root=outer;
 
 #if defined(__EMSCRIPTEN__)
@@ -293,42 +294,62 @@ BatchDialog::BatchDialog(wxWindow* parent, const wxString& initialDirectory, boo
     items_=new wxListCtrl(this,wxID_ANY,wxDefaultPosition,FromDIP(wxSize(720,200)),wxLC_REPORT);
     wxui::setColumns(*items_,{{"Include",65},{"Source",230},{"Output",230},{"Status",200}});
     items_->SetName("Reviewed batch destinations");
+    items_->SetMinSize(FromDIP(wxSize(1, 160)));
     root->Add(items_,1,wxEXPAND|wxLEFT|wxRIGHT|wxBOTTOM,FromDIP(10));
-    auto* selection=new wxBoxSizer(wxHORIZONTAL);
-    selection->Add(new wxButton(this,ID_INCLUDE_ROWS,"Include selected"),0,wxRIGHT,FromDIP(6));
-    selection->Add(new wxButton(this,ID_EXCLUDE_ROWS,"Exclude selected"),0,wxRIGHT,FromDIP(6));
+    auto* selection=new wxWrapSizer(wxHORIZONTAL);
+    selection->Add(new wxButton(this,ID_INCLUDE_ROWS,"Include selected"),0,wxRIGHT | wxBOTTOM,FromDIP(6));
+    selection->Add(new wxButton(this,ID_EXCLUDE_ROWS,"Exclude selected"),0,wxRIGHT | wxBOTTOM,FromDIP(6));
+    selection->Add(new wxButton(this, ID_ROW_DETAILS, "Row details..."), 0, wxRIGHT | wxBOTTOM, FromDIP(6));
     auto* openOutput=new wxButton(this,ID_SHOW_OUTPUT,"Open output folder");
-    selection->Add(openOutput,0);root->Add(selection,0,wxLEFT|wxRIGHT|wxBOTTOM,FromDIP(10));
+    selection->Add(openOutput,0,wxBOTTOM,FromDIP(6));root->Add(selection,0,wxEXPAND|wxLEFT|wxRIGHT|wxBOTTOM,FromDIP(10));
 #if defined(__EMSCRIPTEN__)
     openOutput->Hide();
 #else
-    Bind(wxEVT_BUTTON,[this](wxCommandEvent&){const auto out=wxpath::fromWx(outputDirectory_->GetPath());std::error_code ec;if(fs::is_directory(out,ec))wxLaunchDefaultApplication(wxpath::toWx(out));},ID_SHOW_OUTPUT);
+    Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+        const auto out = wxpath::fromWx(outputDirectory_->GetPath());
+        std::error_code ec;
+        if (!fs::is_directory(out, ec)) {
+            wxMessageBox("The output folder does not exist yet. Scan only reviews destinations; conversion creates the folder.",
+                "Output folder", wxOK | wxICON_INFORMATION, this);
+        } else if (!wxLaunchDefaultApplication(wxpath::toWx(out))) {
+            wxMessageBox(wxString("Could not open the output folder:\n\n") + wxpath::toWx(out),
+                "Output folder", wxOK | wxICON_WARNING, this);
+        }
+    }, ID_SHOW_OUTPUT);
 #endif
+    Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { showSelectedDetails(); }, ID_ROW_DETAILS);
+    items_->Bind(wxEVT_LIST_ITEM_ACTIVATED, [this](wxListEvent&) { showSelectedDetails(); });
+    items_->Bind(wxEVT_LIST_ITEM_SELECTED, [this](wxListEvent&) { refreshSelectionActions(); });
+    items_->Bind(wxEVT_LIST_ITEM_DESELECTED, [this](wxListEvent&) { refreshSelectionActions(); });
+    items_->SetToolTip("Select rows to include or exclude them. Double-click a row for full paths and the complete status message.");
     Bind(wxEVT_BUTTON,[this](wxCommandEvent&){setSelectedRows(true);},ID_INCLUDE_ROWS);
     Bind(wxEVT_BUTTON,[this](wxCommandEvent&){setSelectedRows(false);},ID_EXCLUDE_ROWS);
-    resultSummary_=new wxStaticText(this,wxID_ANY,"Scan to review destinations. Nothing is written until Convert.");
-    resultSummary_->Wrap(FromDIP(700));root->Add(resultSummary_,0,wxEXPAND|wxLEFT|wxRIGHT|wxBOTTOM,FromDIP(10));
+    resultSummary_ = new layout::WrappedLabel(this, wxID_ANY,
+        "Scan to review destinations. Nothing is written until Convert.");
+    root->Add(resultSummary_, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(10));
     auto* details=new wxCollapsiblePane(this,wxID_ANY,"Technical details",wxDefaultPosition,wxDefaultSize,wxCP_DEFAULT_STYLE|wxCP_NO_TLW_RESIZE);
     auto* detailSizer=new wxBoxSizer(wxVERTICAL);
     report_ = new wxTextCtrl(details->GetPane(), wxID_ANY, wxEmptyString, wxDefaultPosition, FromDIP(wxSize(640, 100)),
-                             wxTE_MULTILINE | wxTE_READONLY | wxTE_DONTWRAP);
+                             wxTE_MULTILINE | wxTE_READONLY | wxTE_WORDWRAP);
+    report_->SetMinSize(FromDIP(wxSize(1, 100)));
     detailSizer->Add(report_,1,wxEXPAND);details->GetPane()->SetSizer(detailSizer);
     root->Add(details,0,wxEXPAND|wxLEFT|wxRIGHT|wxBOTTOM,FromDIP(10));
     details->Bind(wxEVT_COLLAPSIBLEPANE_CHANGED,[this](wxCollapsiblePaneEvent&){Layout();});
 
-    auto* buttons = new wxBoxSizer(wxHORIZONTAL);
-    buttons->AddStretchSpacer();
+    auto* buttons = new wxWrapSizer(wxHORIZONTAL);
     scanButton_ = new wxButton(this, ID_SCAN, "Scan / Review");
-    buttons->Add(scanButton_,0,wxRIGHT,FromDIP(8));
+    buttons->Add(scanButton_,0,wxRIGHT | wxBOTTOM,FromDIP(8));
     convertButton_ = new wxButton(this, ID_CONVERT, "Convert 0 ready files");
     convertButton_->Disable();
     Bind(wxEVT_BUTTON,[this](wxCommandEvent&){onScan();},ID_SCAN);
     closeButton_ = new wxButton(this, wxID_CLOSE, "Close");
-    buttons->Add(convertButton_, 0, wxRIGHT, FromDIP(8));
-    buttons->Add(closeButton_);
+    buttons->Add(convertButton_, 0, wxRIGHT | wxBOTTOM, FromDIP(8));
+    buttons->Add(closeButton_, 0, wxBOTTOM, FromDIP(8));
     root->Add(buttons, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(10));
 
     SetSizer(root);
+    SetEscapeId(wxID_CLOSE);
+    refreshSelectionActions();
     wxui::configureResponsiveWindow(*this, wxSize(780, 760), wxSize(560, 420));
     CentreOnParent();
     wxui::constrainWindowToDisplay(*this);
@@ -386,8 +407,17 @@ void BatchDialog::invalidatePlan() {
     browserPlan_.reset(); browserExcludedInputs_.clear();
 #endif
     plan_.reset();planReady_=false;
+    // A reviewed plan belongs to exactly one set of settings. Never show stale
+    // destinations as though they still describe the next conversion.
+    displayedRows_.clear(); included_.clear();
+    if (items_) items_->DeleteAllItems();
+    if (report_) report_->ChangeValue(wxEmptyString);
+    refreshSelectionActions();
     if(convertButton_) {convertButton_->SetLabel("Convert 0 ready files");convertButton_->Disable();}
-    if(resultSummary_)resultSummary_->SetLabel("Settings changed. Scan to review destinations before converting.");
+    if(resultSummary_) {
+        resultSummary_->SetLabel("Settings changed. Scan to review destinations before converting.");
+        Layout();
+    }
 }
 void BatchDialog::showRows(const std::vector<texture::BatchItemResult>& rows,bool selectReady) {
     displayedRows_=rows;included_.clear();items_->DeleteAllItems();
@@ -401,13 +431,40 @@ void BatchDialog::showRows(const std::vector<texture::BatchItemResult>& rows,boo
         wxui::appendRow(*items_,{include?"Yes":"No",texture::pathToUtf8(row.input),texture::pathToUtf8(row.output),std::string(state)+(row.message.empty()?"":" — "+row.message)});
     }
     refreshPlanCount();
+    refreshSelectionActions();
 }
 void BatchDialog::refreshPlanCount() {
     const auto count=static_cast<unsigned long long>(std::count(included_.begin(),included_.end(),true));
     convertButton_->SetLabel(wxString::Format("Convert %llu ready files",count));
     convertButton_->Enable(planReady_ && count>0);
     resultSummary_->SetLabel(wxString::Format("%llu selected; %llu scanned. Conflicts are held; excluded rows are not converted.",count,static_cast<unsigned long long>(displayedRows_.size())));
+    Layout();
 }
+void BatchDialog::refreshSelectionActions() {
+    const bool selected = items_ && items_->GetSelectedItemCount() > 0;
+    bool reviewing = planReady_;
+#if defined(__EMSCRIPTEN__)
+    reviewing = reviewing && !browserBatch_;
+#endif
+    for (int id : {ID_INCLUDE_ROWS, ID_EXCLUDE_ROWS})
+        if (auto* button = FindWindow(id)) button->Enable(reviewing && selected);
+    if (auto* button = FindWindow(ID_ROW_DETAILS)) button->Enable(selected);
+}
+
+void BatchDialog::showSelectedDetails() {
+    if (nativeBusy_) return;
+#if defined(__EMSCRIPTEN__)
+    if (browserBatch_) return;
+#endif
+    const long index = items_->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
+    if (index < 0 || static_cast<std::size_t>(index) >= displayedRows_.size()) return;
+    const auto& row = displayedRows_[static_cast<std::size_t>(index)];
+    const std::string message = "Source:\n" + texture::pathToUtf8(row.input) +
+        "\n\nOutput:\n" + texture::pathToUtf8(row.output) + "\n\n" +
+        wxui::toStd(items_->GetItemText(index, 3));
+    wxMessageBox(wxui::toWx(message), "Batch row details", wxOK | wxICON_INFORMATION, this);
+}
+
 void BatchDialog::setSelectedRows(bool include) {
     if (nativeBusy_ || !planReady_) return;
 #if defined(__EMSCRIPTEN__)
@@ -523,7 +580,7 @@ void BatchDialog::onConvert() {
         showRows(completed,false);
         resultSummary_->SetLabel(wxString::Format("%llu created, %llu skipped, %llu failed, %llu held%s",
             static_cast<unsigned long long>(result.converted),static_cast<unsigned long long>(result.skipped),static_cast<unsigned long long>(result.failed),static_cast<unsigned long long>(result.conflicts),wxString(result.cancelled?" — cancelled":"").c_str()));
-        planReady_=false;convertButton_->Disable();
+        planReady_=false;convertButton_->Disable();refreshSelectionActions();
     } catch(const texture::OperationCancelled&) {invalidatePlan();resultSummary_->SetLabel("Cancelled. Completed outputs remain; the unfinished pair was not committed.");}
       catch(const std::exception& error){invalidatePlan();wxui::showError(this,error);}
 
@@ -1023,11 +1080,11 @@ void BatchDialog::finishBrowserConversion() {
     Layout();
     report_->ChangeValue(wxui::toWx(report.summary()));
 
-    showRows(report.items,false);planReady_=false;convertButton_->Disable();
+    showRows(report.items,false);planReady_=false;convertButton_->Disable();refreshSelectionActions();
     resultSummary_->SetLabel(wxString::Format("%llu created, %llu skipped, %llu failed, %llu held",
         static_cast<unsigned long long>(report.converted),static_cast<unsigned long long>(report.skipped),static_cast<unsigned long long>(report.failed),static_cast<unsigned long long>(report.conflicts)));
     if (report.cancelled) {
-        resultSummary_->SetLabel(resultSummary_->GetLabel()+" — cancelled");
+        resultSummary_->SetLabel(resultSummary_->unwrappedText()+" — cancelled");
         wxMessageBox("Batch conversion stopped. Completed output files were already committed.",
                      "Batch conversion", wxOK | wxICON_WARNING, this);
     } else if (report.failed != 0) {
@@ -1078,6 +1135,7 @@ void BatchDialog::setBrowserControlsBusy(bool busy) {
     items_->Enable(!busy);
     convertButton_->Enable(busy);
     convertButton_->SetLabel(busy ? "Cancel" : "Scan again to convert");
+    refreshSelectionActions();
 }
 
 #endif

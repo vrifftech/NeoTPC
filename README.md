@@ -2,186 +2,130 @@
 
 [![CI](https://github.com/vrifftech/NeoTPC/actions/workflows/ci.yml/badge.svg)](https://github.com/vrifftech/NeoTPC/actions/workflows/ci.yml)
 
-NeoTPC is a standalone C++17/wxWidgets viewer, TXI inspector, and
-converter for Odyssey texture assets.
+NeoTPC is a cross-platform texture viewer, editor, and converter for BioWare/Odyssey texture assets. It is aimed primarily at KotOR modding and includes both a wxWidgets desktop application and a command-line tool.
 
 ## Features
 
-- Opens TPC, Xbox TXB, TGA, DDS, PNG, JPEG/JPG, BMP, and TXI files. Container
-  signatures are detected from content, so valid textures can still open when
-  their extension is missing or wrong.
-- Checkerboard RGBA, opaque RGB, alpha grayscale, and alpha red-mask views.
-- Zoom, pan, fit-to-window, actual-pixel display, cube-face selection,
-  per-layer mip-level selection, and animation-frame playback.
-- **Open Conflicting Images** scans the current file's folder for image files
-  with the same case-insensitive base name, including numbered duplicates and
-  `copy` suffixes. It displays every match beside the editable image in
-  independently resizable, read-only comparison panes. Layer, mip, channel,
-  fit, and toolbar zoom selections are applied across the panes. Loading is
-  performed on a background worker, remains cancellable, and is bounded to 64
-  panes, 128 MiB of encoded input per candidate, and 256 MiB of retained
-  decoded comparison data.
-- Converts pixel-bearing inputs to TPC, TGA, DDS, PNG, JPEG, or BMP.
-- Reads, edits, validates, embeds, and exports TXI metadata, with a searchable
-  directive reference.
-- Reads and preserves authored mip chains. Writes uncompressed, grayscale,
-  Xbox Morton-swizzled BGRA, DXT1/BC1, and DXT5/BC3 TPC data; DDS additionally
-  supports DXT3/BC2 and standard six-face cubemaps.
-- Reads standard DDS BGRA/BGR, A1R5G5B5, R5G6B5, ARGB4444,
-  DXT1/DXT3/DXT5, pitched rows, mipmap, and full or partial cubemap layouts,
-  plus BioWare DDS.
-- Normalizes Odyssey TPC cubemap face order/orientation for viewing and reverses
-  that normalization on export. A square 6:1 vertical TGA strip is recognized
-  as a cubemap even without `cube 1` metadata.
-- Parses counted TXI font-coordinate blocks structurally, accepts common legacy
-  aliases such as `decal1`, and validates the broader engine/tool key catalog.
-- Performs recursive batch conversion with relative paths, sidecar awareness,
-  overwrite policy, progress/cancel support, and collision-safe names.
-- Replaces an image and its TXI sidecar as a rollback-capable transaction.
-- Includes `neotpc-cli` for automation and conversion pipelines.
-- Uses the same Neo dark-mode settings/status-bar behavior, release helper,
-  scripts, static Windows runtime policy, icon layout, and install conventions
-  as the other Neo tools.
+- Open **TPC, TXB, TGA, DDS, PNG, JPEG, BMP, and TXI** files.
+- Export textures as **TPC, TGA, DDS, PNG, JPEG, or BMP**.
+- View mipmaps, cubemaps, animation layers, RGB/alpha channels, and transparency.
+- Zoom, pan, fit-to-window, and compare related images side by side.
+- Perform basic pixel operations such as alpha editing and image flipping.
+- Read and edit embedded or standalone **TXI** metadata.
+- Validate TXI and browse a searchable TXI directive reference grid.
+- Preview conversion settings before exporting.
+- Batch-convert folders with recursive scanning, overwrite controls, and collision handling.
+- Use `neotpc-cli` for scripts and automated conversion workflows.
 
-## Repository boundary
+TXB files are supported as input only and should be exported to another format after editing.
 
-NeoTPC consumes settings and common wxWidgets UI infrastructure from the separate `neoshared` repository through the `neoshared::wx` target. Texture-domain code, renderer data, the TXI catalog, and the batch workflow remain in NeoTPC because no other tool currently needs them. PNG and JPEG implementations are external dependencies declared in `vcpkg.json`; codec source is not vendored in this repository.
+## Basic workflow
 
-Clone the repositories as siblings:
+1. Open a texture with **File → Open**.
+2. Inspect the image on the **Texture** tab.
+3. Edit or validate metadata on the **TXI** tab.
+4. Use the **Reference** tab to look up TXI directives.
+5. Open **File → Export / Convert** or press **Ctrl+E** to configure an output format and destination.
+6. Optionally preview the encoded result, then choose **Export copy**.
 
-```text
-workspace/
-  neoshared/
-  NeoTPC/
-```
+**Save** preserves the current document format. Use **Export / Convert** when changing formats or encodings.
 
-CMake automatically detects `../neoshared`. For another layout, pass `--neoshared-root /path/to/neoshared` to `build.sh`, `-NeoSharedRoot C:\path\to\neoshared` to `build.ps1`, or set `NEOSHARED_ROOT` directly.
+For multiple files, use **File → Batch conversion**.
 
-NeoTPC does not currently publish a C++ SDK. Codec and application headers live under `src/` and are private implementation details; the install target contains only the applications and required documentation.
+## Supported formats
 
-## Format support
+| Format | Read | Write | Notes |
+| --- | :---: | :---: | --- |
+| TPC | Yes | Yes | RGB/RGBA/grayscale, DXT1/BC1, DXT5/BC3, mipmaps, embedded TXI |
+| TXB | Yes | No | Xbox texture input; export to another format |
+| TGA | Yes | Yes | True-color, grayscale, paletted, RLE |
+| DDS | Yes | Yes | Standard and BioWare DDS, mipmaps and cubemaps |
+| PNG | Yes | Yes | Uses libspng |
+| JPEG | Yes | Yes | Uses a libjpeg-compatible library; alpha is discarded on export |
+| BMP | Yes | Yes | Common paletted and true-color variants |
+| TXI | Yes | Yes | Standalone metadata editing and validation |
 
-| Format | Read | Write | Coverage |
-| --- | --- | --- | --- |
-| TPC | Yes | Yes | Raw RGB/RGBA/grayscale, Xbox 0x0C Morton-swizzled BGRA, DXT1, DXT5, complete mip chains, embedded TXI, canonical cube/animation layers |
-| TXB | Yes | No | Xbox swizzled BGRA/grayscale and DXT1/DXT5 input with embedded TXI; convert to another format |
-| TGA | Yes | Yes | Paletted, true-color, grayscale, and RLE input; RGBA output; 6:1 cubemap inference |
-| DDS | Yes | Yes | Standard and BioWare headers; BGRA/BGR with stored row pitch, A1R5G5B5, R5G6B5, ARGB4444, DXT1/DXT3/DXT5, mipmaps, and full or partial cubemaps |
-| PNG | Yes | Yes | External libspng dependency; zlib is resolved transitively |
-| JPEG | Yes | Yes | External libjpeg-compatible dependency; the vcpkg manifest selects libjpeg-turbo; output drops alpha |
-| BMP | Yes | Yes | Paletted 1/4/8-bit and 16/24/32-bit true-color input |
-| TXI | Yes | Yes | Source editing, typed validation, searchable catalog |
+## Command line
 
-## Build
-
-NeoTPC requires a C++17 compiler, CMake, the sibling `neoshared` repository,
-libspng, and a libjpeg-compatible implementation. The committed `vcpkg.json`
-pins the dependency registry and selects libspng plus libjpeg-turbo. On Windows
-it also selects wxWidgets. No manual `vcpkg install` command is required;
-configuration with the vcpkg toolchain installs the manifest automatically.
-
-Recommended sibling layout:
-
-```text
-workspace/
-  neoshared/
-  NeoTPC/
-  vcpkg/
-```
-
-Bootstrap vcpkg once:
-
-```sh
-git clone https://github.com/microsoft/vcpkg.git ../vcpkg
-bash ../vcpkg/bootstrap-vcpkg.sh -disableMetrics
-```
-
-Linux GUI build. wxWidgets comes from the system package while the image codecs
-come from the pinned vcpkg manifest:
-
-```sh
-sudo apt install build-essential cmake ninja-build pkg-config libwxgtk3.2-dev
-bash ./scripts/build.sh \
-  --vcpkg-root ../vcpkg \
-  --vcpkg-triplet x64-linux \
-  --wx ON \
-  --require-wx ON \
-  --jobs "$(nproc)"
-```
-
-Linux CLI/core-only build:
-
-```sh
-bash ./scripts/build.sh \
-  --vcpkg-root ../vcpkg \
-  --vcpkg-triplet x64-linux \
-  --wx OFF \
-  --cli ON \
-  --jobs "$(nproc)"
-```
-
-Windows GUI build from a Visual Studio 2026 Developer PowerShell:
-
-```powershell
-git clone https://github.com/microsoft/vcpkg.git ..\vcpkg
-..\vcpkg\bootstrap-vcpkg.bat -disableMetrics
-
-.\scripts\build.ps1 `
-  -Wx ON `
-  -RequireWx ON `
-  -VcpkgRoot ..\vcpkg `
-  -VcpkgTriplet x64-windows-static `
-  -Parallel ([Environment]::ProcessorCount)
-```
-
-`--no-vcpkg` or `-NoVcpkg` remains available for environments that already
-provide a CMake package exporting `spng::spng` or `spng::spng_static`, a
-`JPEG::JPEG` target, and wxWidgets when the GUI is enabled.
-
-Run the codec tests with:
-
-```sh
-bash ./scripts/build.sh \
-  --build-dir build-tests \
-  --vcpkg-root ../vcpkg \
-  --vcpkg-triplet x64-linux \
-  --wx OFF \
-  --clean \
-  -- \
-  -DNEOTPC_BUILD_TESTS=ON
-ctest --test-dir build-tests --output-on-failure
-```
-
-## CLI examples
+Examples:
 
 ```text
 neotpc-cli info diffuse.tpc
-neotpc-cli convert xbox-texture.txb xbox-texture.tpc --compression swizzled-bgra
-neotpc-cli convert diffuse.tga diffuse.tpc --compression dxt5 --dxt-quality high --bicubic
-neotpc-cli convert translucent.tga translucent.dds --compression dxt3
-neotpc-cli convert mask.png mask.dds --compression dxt1 --dxt1-alpha-threshold 128
-neotpc-cli batch source converted --format tpc --recursive --compression auto
+neotpc-cli convert diffuse.tga diffuse.tpc --compression dxt5
+neotpc-cli convert texture.tpc texture.png
+neotpc-cli batch source converted --format tpc --recursive
 neotpc-cli txi-validate diffuse.tpc
 ```
 
-Run `neotpc-cli --help` for all conversion and alpha/TXI mutation options.
+Run:
 
-## Comparing conflicting images
+```text
+neotpc-cli --help
+```
 
-Open the image you want to treat as the editable source, then choose **File →
-Open Conflicting Images**, press **Ctrl+Shift+O**, or use the button on the
-Texture page. For `DXUNtex.tga`, NeoTPC will group same-folder names such as
-`dxuntex.tpc`, `dxUnTex(1).tga`, `dxuntex(2) - copy.tpc`, and
-`dxuNteX- copy.tga`. TXI sidecars and unrelated longer stems are excluded.
-Each candidate is decoded on a bounded background worker so the progress
-dialog stays responsive. Drag any divider between panes to resize the
-comparison layout.
-Use **File → Close Image Comparison** to return to a single editable pane.
+for the complete command and conversion options.
 
+## Building
 
+NeoTPC uses C++17, CMake, wxWidgets, `neoshared`, libspng, and a libjpeg-compatible library. The repository includes a vcpkg manifest for its external dependencies.
 
-## Continuous integration
+Keep NeoTPC and `neoshared` beside each other:
 
-GitHub Actions checks out `vrifftech/neoshared` beside this repository, reads the pinned vcpkg baseline from `vcpkg.json`, and checks out that exact vcpkg revision. It then builds the full wxWidgets application on Ubuntu 24.04 and Windows Server 2025 with Visual Studio 2026. Codec dependencies are restored through the vcpkg manifest and GitHub Actions binary cache. Successful non-pull-request runs publish staged Linux and Windows artifacts.
+```text
+workspace/
+  neoshared/
+  NeoTPC/
+  vcpkg/        # optional, but recommended
+```
 
-The shared dependency defaults to `neoshared/main`. Set the repository Actions variable `NEOSHARED_REF` to a release tag or commit SHA to pin normal CI builds. A manual workflow run can override the ref, and the workflow accepts the `neoshared-updated` repository-dispatch event for cross-repository compatibility checks.
+The build scripts automatically look for `../neoshared` and `../vcpkg`.
+
+### Linux
+
+Install a compiler, CMake, Ninja, and wxWidgets, then run:
+
+```sh
+./scripts/build.sh \
+  --vcpkg-root ../vcpkg \
+  --wx ON \
+  --require-wx ON
+```
+
+For a CLI-only build:
+
+```sh
+./scripts/build.sh \
+  --vcpkg-root ../vcpkg \
+  --wx OFF \
+  --cli ON
+```
+
+### macOS
+
+For the application bundle:
+
+```sh
+./scripts/build-macos.sh --vcpkg-root ../vcpkg
+```
+
+### Windows
+
+From a Visual Studio Developer PowerShell:
+
+```powershell
+.\scripts\build.ps1 `
+  -Wx ON `
+  -RequireWx ON `
+  -VcpkgRoot ..\vcpkg
+```
+
+If dependencies are already provided by the system, the native build scripts support `--no-vcpkg` / `-NoVcpkg`. The WebAssembly build manages its pinned vcpkg checkout automatically.
+
+## Repository layout
+
+- `src/core` — document and application state
+- `src/texture` — NeoTPC-specific image conversion support
+- `src/wx` — desktop UI
+- `src/cli` — command-line application
+- `scripts` — build helpers
+- `neoshared` — separate sibling repository containing shared texture, TXI, and UI infrastructure

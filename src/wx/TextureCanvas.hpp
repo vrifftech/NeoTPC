@@ -24,6 +24,7 @@ public:
     bool smooth() const{return smooth_;} Grid grid() const{return grid_;}
 private:
     void onPaint(wxPaintEvent&); void onSize(wxSizeEvent&);
+    void onKeyDown(wxKeyEvent&);
     void onMouseWheel(wxMouseEvent&); void onLeftDown(wxMouseEvent&);void onLeftUp(wxMouseEvent&);
     void onMotion(wxMouseEvent&);void onDoubleClick(wxMouseEvent&);
     void zoomBy(double factor, const wxPoint& anchor);void changed();

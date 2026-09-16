@@ -60,6 +60,8 @@ public:
     std::string outputIssue(const std::filesystem::path& output, const texture::TextureSaveOptions& options) const;
     bool outputPreservesImage(const std::filesystem::path& output, const texture::TextureSaveOptions& options) const;
     TexturePreview preview(const std::filesystem::path& output, const texture::TextureSaveOptions& options) const;
+    bool previewMatches(const std::filesystem::path& output, const texture::TextureSaveOptions& options,
+                        const TexturePreview& preview) const;
     // Commit exactly the staged bytes. A stale preview cannot overwrite a file.
     // adopt=false is an export: it leaves this document and its saved state alone.
     void commitPreview(const std::filesystem::path& output, const TexturePreview& preview, bool adopt = false);

@@ -3,12 +3,19 @@
 # Existing developer checkouts are never updated or reset by this resolver.
 get_filename_component(_neo_tool_source "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
 function(_neo_shared_source output tool_source)
-    if(TARGET neoshared::wx)
-        if(NOT EXISTS "${NEOSHARED_ROOT}/CMakeLists.txt")
-            message(FATAL_ERROR "The workspace did not supply its shared source directory.")
+    # Respect an explicit CMake/build-script override. This is important for CI,
+    # packaged workspaces, and offline builds; silently replacing it with an
+    # automatic checkout makes --neoshared-root ineffective.
+    if(DEFINED NEOSHARED_ROOT AND NOT "${NEOSHARED_ROOT}" STREQUAL "")
+        get_filename_component(_explicit "${NEOSHARED_ROOT}" ABSOLUTE BASE_DIR "${tool_source}")
+        if(NOT EXISTS "${_explicit}/CMakeLists.txt")
+            message(FATAL_ERROR "NEOSHARED_ROOT does not contain CMakeLists.txt: ${_explicit}")
         endif()
-        set(${output} "${NEOSHARED_ROOT}" PARENT_SCOPE)
+        set(${output} "${_explicit}" PARENT_SCOPE)
         return()
+    endif()
+    if(TARGET neoshared::wx)
+        message(FATAL_ERROR "A workspace supplied neoshared::wx without NEOSHARED_ROOT.")
     endif()
     foreach(_name IN ITEMS neoshared NeoShared)
         get_filename_component(_candidate "${tool_source}/../${_name}" ABSOLUTE)
@@ -64,7 +71,7 @@ function(_neo_shared_source output tool_source)
     set(${output} "${_source}" PARENT_SCOPE)
 endfunction()
 _neo_shared_source(_neo_resolved_shared "${_neo_tool_source}")
-# Do not read the old environment variable or retain a stale cache root.
+# Publish the resolved source path to the cache for the rest of this configure.
 set(NEOSHARED_ROOT "${_neo_resolved_shared}" CACHE PATH "Automatically resolved NeoShared sources" FORCE)
 if(CMAKE_SCRIPT_MODE_FILE)
     # Shell/PowerShell build entry points use the same resolver before packaging.

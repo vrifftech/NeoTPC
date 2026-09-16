@@ -135,15 +135,11 @@ void TxiEditor::applyTheme(bool darkMode) {
 
 void TxiEditor::goToOneBasedLine(std::size_t lineNumber) {
     if (lineNumber == 0) return;
-    const std::string text = wxui::toStd(GetValue());
-    std::size_t position = 0;
-    for (std::size_t line = 1; line < lineNumber; ++line) {
-        const std::size_t next = text.find('\n', position);
-        if (next == std::string::npos) return;
-        position = next + 1;
-    }
-    SetInsertionPoint(static_cast<long>(position));
-    ShowPosition(static_cast<long>(position));
+    if (lineNumber > static_cast<std::size_t>(GetNumberOfLines())) return;
+    const long position = XYToPosition(0, static_cast<long>(lineNumber - 1));
+    if (position < 0) return;
+    SetInsertionPoint(position);
+    ShowPosition(position);
     SetFocus();
     updateCompletion(false);
 }
