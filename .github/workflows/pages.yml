@@ -99,6 +99,15 @@ jobs:
           test -f tool/dist-wasm/neotpc.wasm
           grep -q 'NeoTPC' tool/dist-wasm/index.html
 
+      - name: Upload WebAssembly build
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: NeoTPC-web-wasm-${{ github.sha }}
+          path: tool/dist-wasm/
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Configure GitHub Pages
         if: ${{ github.event_name != 'pull_request' }}
         uses: actions/configure-pages@v6

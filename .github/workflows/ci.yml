@@ -16,14 +16,33 @@ concurrency:
 
 jobs:
   linux:
-    name: Linux (GCC + system wxWidgets)
+    name: Linux AppImage (x86-64, Debian 12)
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    container: debian:12
+    timeout-minutes: 90
     env:
       VCPKG_BINARY_SOURCES: clear;default,readwrite
       WX_CONFIG: /usr/bin/wx-config
 
     steps:
+      - name: Install AppImage build dependencies
+        run: |
+          apt-get update
+          apt-get install --no-install-recommends -y \
+            build-essential \
+            ca-certificates \
+            cmake \
+            curl \
+            file \
+            git \
+            ninja-build \
+            pkg-config \
+            python3 \
+            tar \
+            unzip \
+            zip \
+            libwxgtk3.2-dev
+
       - name: Check out NeoTPC
         uses: actions/checkout@v7
         with:
@@ -42,11 +61,11 @@ jobs:
         id: vcpkg-baseline
         shell: bash
         run: |
-          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          python3 - <<'PYV' >> "$GITHUB_OUTPUT"
           import json
           with open('tool/vcpkg.json', encoding='utf-8') as manifest_file:
               print(f"sha={json.load(manifest_file)['builtin-baseline']}")
-          PY
+          PYV
 
       - name: Check out pinned vcpkg
         uses: actions/checkout@v7
@@ -57,55 +76,36 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Install system build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y \
-            build-essential \
-            cmake \
-            ninja-build \
-            pkg-config \
-            libwxgtk3.2-dev
-
-      - name: Verify system wxWidgets
-        run: |
-          test -x "$WX_CONFIG"
-          "$WX_CONFIG" --version
-          "$WX_CONFIG" --selected-config
-          "$WX_CONFIG" --libs core,base,adv,stc > /dev/null
-
       - name: Bootstrap vcpkg
         run: bash ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
 
-      - name: Configure and build
+      - name: Build AppImage
         working-directory: tool
         run: |
-          bash ./scripts/build.sh \
-            --build-dir build \
-            --build-type Release \
-            --wx ON \
-            --require-wx ON \
-            --cli ON \
-            --minimal-release OFF \
-            --generator Ninja \
+          bash ./scripts/build-linux-appimage.sh \
+            --neoshared-root ../neoshared \
             --vcpkg-root ../vcpkg \
             --vcpkg-triplet x64-linux \
             --jobs 2 \
             --clean \
-            -- \
-            -DwxWidgets_CONFIG_EXECUTABLE="$WX_CONFIG"
+            --cmake-arg=-DwxWidgets_CONFIG_EXECUTABLE="$WX_CONFIG"
 
-      - name: Stage install tree
-        run: cmake --install tool/build --config Release --prefix tool/stage
+      - name: Verify AppImage checksum
+        run: |
+          cd tool/dist
+          sha256sum -c NeoTPC-*-linux-x86_64.AppImage.sha256
 
-      - name: Upload Linux artifact
+      - name: Upload Linux AppImage
         if: ${{ github.event_name != 'pull_request' }}
         uses: actions/upload-artifact@v7
         with:
-          name: NeoTPC-linux-${{ github.sha }}
-          path: tool/stage/
+          name: NeoTPC-linux-x86_64-${{ github.sha }}
+          path: |
+            tool/dist/NeoTPC-*-linux-x86_64.AppImage
+            tool/dist/NeoTPC-*-linux-x86_64.AppImage.sha256
           if-no-files-found: error
           retention-days: 14
+          compression-level: 0
 
   windows:
     name: Windows (Visual Studio 2026 + wxWidgets 3.3.3)
@@ -181,11 +181,11 @@ jobs:
         shell: pwsh
         run: cmake --install tool/build --config Release --prefix tool/stage
 
-      - name: Upload Windows artifact
+      - name: Upload Windows executable
         if: ${{ github.event_name != 'pull_request' }}
         uses: actions/upload-artifact@v7
         with:
-          name: NeoTPC-windows-vs2026-${{ github.sha }}
+          name: NeoTPC-windows-x86_64-${{ github.sha }}
           path: tool/stage/
           if-no-files-found: error
           retention-days: 14
