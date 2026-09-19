@@ -46,6 +46,7 @@ include(GNUInstallDirs)
 
 message(STATUS "Using neoshared: ${NEOSHARED_ROOT}")
 include("${NEOSHARED_ROOT}/cmake/NeoMinimalRelease.cmake")
+include("${NEOSHARED_ROOT}/cmake/NeoVersion.cmake")
 include("${NEOSHARED_ROOT}/cmake/NeoMacOSBundle.cmake")
 include("${NEOSHARED_ROOT}/cmake/NeoWasm.cmake")
 if(NOT TARGET neoshared::wx)
@@ -113,6 +114,12 @@ target_compile_definitions(neotpc_core PUBLIC NEOTPC_VERSION="${PROJECT_VERSION}
 option(NEOTPC_BUILD_CLI "Build the NeoTPC command-line utility" ON)
 if(NEOTPC_BUILD_CLI)
     add_executable(neotpc-cli src/cli/main.cpp)
+    neo_add_windows_version_resource(neotpc-cli
+        VERSION "${PROJECT_VERSION}"
+        PRODUCT_NAME "NeoTPC"
+        FILE_DESCRIPTION "NeoTPC command-line texture converter"
+        INTERNAL_NAME "neotpc-cli"
+        ORIGINAL_FILENAME "neotpc-cli.exe")
     target_link_libraries(neotpc-cli PRIVATE neotpc_core)
     target_compile_features(neotpc-cli PRIVATE cxx_std_17)
     install(TARGETS neotpc-cli RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
@@ -203,15 +210,19 @@ if(NEOTPC_BUILD_WX_GUI)
             src/wx/main.cpp
         )
         if(WIN32)
-            list(APPEND NEOTPC_WX_SOURCES resources/neotpc.rc)
-        endif()
-        if(WIN32)
             add_executable(NeoTPC WIN32 ${NEOTPC_WX_SOURCES})
         elseif(APPLE)
             add_executable(NeoTPC MACOSX_BUNDLE ${NEOTPC_WX_SOURCES})
         else()
             add_executable(NeoTPC ${NEOTPC_WX_SOURCES})
         endif()
+        neo_add_windows_version_resource(NeoTPC
+            VERSION "${PROJECT_VERSION}"
+            PRODUCT_NAME "NeoTPC"
+            FILE_DESCRIPTION "NeoTPC Odyssey texture editor and converter"
+            INTERNAL_NAME "NeoTPC"
+            ORIGINAL_FILENAME "NeoTPC.exe"
+            ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/tpc.ico")
         neo_configure_macos_bundle(NeoTPC
             NAME "NeoTPC"
             IDENTIFIER "com.vrifftech.neotpc"
