@@ -72,6 +72,25 @@ void TextureDocument::open(const std::filesystem::path& path) {
     sidecarBytes_ = std::move(sidecar);
     texture_ = std::move(loaded);
     path_ = path;
+    sourceBacked_ = true;
+    options_ = texture::importedTextureOptions(texture_);
+    open_ = true;
+    ++revision_;
+    pixelRevision_ = ++nextPixelRevision_;
+    undo_.clear(); redo_.clear(); historyPixels_.reset(); editGroup_.clear();
+    resetSavedState();
+}
+void TextureDocument::openMemory(std::vector<std::uint8_t> bytes,
+                                 const std::filesystem::path& logicalPath,
+                                 std::string sidecarTxi) {
+    if (logicalPath.empty()) throw texture::TextureError("A resource filename is required to identify the texture format.");
+    auto loaded = texture::loadTextureBytes(bytes, logicalPath, sidecarTxi);
+    sourceBytes_ = std::move(bytes);
+    if (sidecarTxi.empty()) sidecarBytes_.reset();
+    else sidecarBytes_ = std::vector<std::uint8_t>(sidecarTxi.begin(), sidecarTxi.end());
+    texture_ = std::move(loaded);
+    path_ = logicalPath.filename();
+    sourceBacked_ = false;
     options_ = texture::importedTextureOptions(texture_);
     open_ = true;
     ++revision_;
@@ -80,14 +99,14 @@ void TextureDocument::open(const std::filesystem::path& path) {
     resetSavedState();
 }
 bool TextureDocument::reloadIfSourceChanged() {
-    if (!open_) return false;
+    if (!open_ || !sourceBacked_) return false;
     if (texture::readFileBytes(path_) == sourceBytes_ && readSidecar(path_) == sidecarBytes_) return false;
     const auto sourcePath = path_;
     open(sourcePath);
     return true;
 }
 void TextureDocument::close() noexcept {
-    open_ = false; txiDirty_ = contentDirty_ = optionsDirty_ = false;
+    open_ = false; sourceBacked_ = false; txiDirty_ = contentDirty_ = optionsDirty_ = false;
     path_.clear(); texture_ = {}; options_ = {}; savedTxi_.clear(); savedOptions_ = {};
     sourceBytes_.clear(); sidecarBytes_.reset(); undo_.clear(); redo_.clear(); historyPixels_.reset(); editGroup_.clear();
     ++revision_;
@@ -180,12 +199,13 @@ bool TextureDocument::layoutPending() const {
     return false;
 }
 void TextureDocument::requireSourceUnchanged() const {
+    if (!sourceBacked_) return;
     if (texture::readFileBytes(path_) != sourceBytes_ || readSidecar(path_) != sidecarBytes_)
         throw texture::TextureError("This texture or its TXI changed on disk after opening. Reopen it or export to another name; external changes were not overwritten.");
 }
 
 bool TextureDocument::outputTouchesSource(const std::filesystem::path& output) const {
-    if (!open_ || output.empty()) return false;
+    if (!open_ || !sourceBacked_ || output.empty()) return false;
     std::vector<std::filesystem::path> sources{path_}, outputs{output};
     if (texture::usesTxiSidecar(path_)) sources.push_back(sidecarPath(path_));
     if (texture::usesTxiSidecar(output)) outputs.push_back(sidecarPath(output));
@@ -261,7 +281,7 @@ void TextureDocument::commitPreview(const std::filesystem::path& output, const T
     using namespace texture;
     if (!open_ || staged.revision != revision_ || staged.outputKind != kindForExtension(output))
         throw TextureError("This encoded preview is stale. Preview the current document and output settings again before saving.");
-    const bool sameSource = samePath(output, path_);
+    const bool sameSource = sourceBacked_ && samePath(output, path_);
     if (sameSource) requireSourceUnchanged();
     if (!adopt || !sameSource) validateExportDestination(output);
     const bool bytesUnchanged = sameSource && staged.encoded.image == sourceBytes_ &&
@@ -275,7 +295,7 @@ void TextureDocument::commitPreview(const std::filesystem::path& output, const T
     const bool pixelsUnchanged = samePixels(texture_, next);
     if (!bytesUnchanged) saveEncodedTexture(bytes, sidecar, output);
     sourceBytes_ = std::move(bytes); sidecarBytes_ = std::move(sidecar);
-    texture_ = std::move(next); texture_.sourcePath = output; path_ = output;
+    texture_ = std::move(next); texture_.sourcePath = output; path_ = output; sourceBacked_ = true;
     options_ = texture::importedTextureOptions(texture_);
     options_.dxtQuality = staged.options.dxtQuality; options_.dxtMetric = staged.options.dxtMetric;
     options_.weightColorByAlpha = staged.options.weightColorByAlpha; options_.dxt1AlphaThreshold = staged.options.dxt1AlphaThreshold;
@@ -291,14 +311,17 @@ void TextureDocument::saveTo(const std::filesystem::path& output) {
         throw texture::TextureError("This source format is read-only. Use Export / Convert to write a supported format.");
     if (texture::kindForExtension(output) != texture_.kind)
         throw texture::TextureError("Save preserves the detected source format. Use Save As with its correct extension, or Export / Convert for another format.");
-    if (samePath(output, path_)) {
+    if (sourceBacked_ && samePath(output, path_)) {
         requireSourceUnchanged();
         if (!dirty()) { finishEditGroup(); return; }
     }
     const auto staged = preview(output, options_);
     commitPreview(output, staged, true);
 }
-void TextureDocument::save() { saveTo(path_); }
+void TextureDocument::save() {
+    if (!sourceBacked_) throw texture::TextureError("This archive resource is a detached working copy. Use Save As to create a file.");
+    saveTo(path_);
+}
 void TextureDocument::saveAs(const std::filesystem::path& output) { saveTo(output); }
 std::string TextureDocument::exportSummary(const std::filesystem::path& output, const texture::TextureSaveOptions& opts,
                                             const TexturePreview* staged) const {
@@ -356,6 +379,7 @@ std::string TextureDocument::summary() const {
     out << texture::textureSummary(texture_);
     if (layoutPending()) out << "\nLAYOUT CHANGES PENDING: the left preview shows the loaded layout. Use Preview output to validate the proposed layout.\n";
     if (!workflow::writableFormat(texture_.kind)) out << "\nRead-only source format. Export to a supported format to preserve edits.\n";
+    else if (!sourceBacked_) out << "\nArchive resource snapshot. Save As creates a separate working file.\n";
     else if (!workflow::canSaveInPlace(texture_.kind, path_)) out << "\nThe filename does not match the detected format. Save As requires a matching extension.\n";
     else if (!dirty()) out << "\nSave preserves the original encoded bytes. Export settings are separate.\n";
     else if (canPatchEmbeddedTxi()) out << "\nTXI-only save preserves the encoded image.\n";

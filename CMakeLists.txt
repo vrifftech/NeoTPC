@@ -126,10 +126,11 @@ if(NEOTPC_BUILD_CLI)
 endif()
 
 option(NEOTPC_BUILD_WX_GUI "Build the wxWidgets NeoTPC desktop GUI when wxWidgets is available" ON)
-option(NEOTPC_REQUIRE_WX_GUI "Fail configure if wxWidgets is unavailable while NEOTPC_BUILD_WX_GUI is ON" OFF)
+option(NEOTPC_BUILD_WX_MODULE "Build the reusable wxWidgets NeoTPC editor panel" OFF)
+option(NEOTPC_REQUIRE_WX_GUI "Fail configure if wxWidgets is unavailable while NeoTPC wx targets are requested" OFF)
 
 function(neotpc_link_wx target_name)
-    target_compile_definitions(${target_name} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_compile_definitions(${target_name} PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
     set(_wx_targets)
     if(TARGET wx::core)
         set(_neotpc_wx_link_targets wx::core wx::base wx::adv wx::aui)
@@ -145,48 +146,40 @@ function(neotpc_link_wx target_name)
         list(APPEND _wx_targets wxWidgets::wxWidgets)
     endif()
     if(_wx_targets)
-        target_link_libraries(${target_name} PRIVATE ${_wx_targets})
+        target_link_libraries(${target_name} PUBLIC ${_wx_targets})
     else()
         if(wxWidgets_USE_FILE)
             include(${wxWidgets_USE_FILE})
         endif()
-        target_include_directories(${target_name} SYSTEM PRIVATE ${wxWidgets_INCLUDE_DIRS})
-        target_compile_definitions(${target_name} PRIVATE ${wxWidgets_DEFINITIONS})
-        target_link_libraries(${target_name} PRIVATE ${wxWidgets_LIBRARIES})
+        target_include_directories(${target_name} SYSTEM PUBLIC ${wxWidgets_INCLUDE_DIRS})
+        target_compile_definitions(${target_name} PUBLIC ${wxWidgets_DEFINITIONS})
+        target_link_libraries(${target_name} PUBLIC ${wxWidgets_LIBRARIES})
     endif()
     neo_force_static_msvc_runtime(${target_name})
 endfunction()
 
-if(NEOTPC_BUILD_WX_GUI)
+if(NEOTPC_BUILD_WX_GUI OR NEOTPC_BUILD_WX_MODULE)
     set(NEOTPC_WX_COMPONENTS core base adv aui)
     if(NOT EMSCRIPTEN)
         list(APPEND NEOTPC_WX_COMPONENTS stc)
     endif()
 
-    # CMake's Unix FindwxWidgets module searches wx-config only inside the
-    # active find root. A vcpkg toolchain changes that root, which can hide
-    # the host wx-config installed by a system package manager. Resolve the
-    # native tool explicitly before calling find_package().
-    if(UNIX AND NOT CMAKE_CROSSCOMPILING
-       AND NOT wxWidgets_CONFIG_EXECUTABLE)
-        find_program(NEOTPC_SYSTEM_WX_CONFIG
-            NAMES wx-config
-            NO_CMAKE_FIND_ROOT_PATH)
+    if(UNIX AND NOT CMAKE_CROSSCOMPILING AND NOT wxWidgets_CONFIG_EXECUTABLE)
+        find_program(NEOTPC_SYSTEM_WX_CONFIG NAMES wx-config NO_CMAKE_FIND_ROOT_PATH)
         if(NEOTPC_SYSTEM_WX_CONFIG)
-            set(wxWidgets_CONFIG_EXECUTABLE
-                "${NEOTPC_SYSTEM_WX_CONFIG}"
+            set(wxWidgets_CONFIG_EXECUTABLE "${NEOTPC_SYSTEM_WX_CONFIG}"
                 CACHE FILEPATH "Path to wx-config" FORCE)
         endif()
     endif()
 
     if(WIN32)
         find_package(wxWidgets CONFIG QUIET COMPONENTS ${NEOTPC_WX_COMPONENTS})
-        if(NOT wxWidgets_FOUND AND NOT TARGET wx::core)
+        if(NOT wxWidgets_FOUND AND NOT TARGET wx::core AND NOT TARGET wxWidgets::wxWidgets)
             find_package(wxWidgets QUIET MODULE COMPONENTS ${NEOTPC_WX_COMPONENTS})
         endif()
     else()
         find_package(wxWidgets QUIET MODULE COMPONENTS ${NEOTPC_WX_COMPONENTS})
-        if(NOT wxWidgets_FOUND AND NOT TARGET wx::core)
+        if(NOT wxWidgets_FOUND AND NOT TARGET wx::core AND NOT TARGET wxWidgets::wxWidgets)
             find_package(wxWidgets CONFIG QUIET COMPONENTS ${NEOTPC_WX_COMPONENTS})
         endif()
     endif()
@@ -195,78 +188,89 @@ if(NEOTPC_BUILD_WX_GUI)
     if(TARGET wx::core AND (EMSCRIPTEN OR TARGET wx::stc))
         set(NEOTPC_WX_TARGETS_READY ON)
     endif()
-    if(wxWidgets_FOUND OR NEOTPC_WX_TARGETS_READY)
+    if(wxWidgets_FOUND OR NEOTPC_WX_TARGETS_READY OR TARGET wxWidgets::wxWidgets)
         if(NOT EMSCRIPTEN)
             find_package(Threads REQUIRED)
         endif()
-        set(NEOTPC_WX_SOURCES
+        add_library(neotpc_wx STATIC
             src/wx/BatchDialog.cpp
             src/wx/BrowserWorkload.cpp
             src/wx/EncodingOptionsPanel.cpp
             src/wx/TextureCanvas.cpp
+            src/wx/TextureEditorPanel.cpp
             src/wx/TxiDictionaryPanel.cpp
             src/wx/TxiDiagnosticsPanel.cpp
             src/wx/TxiEditor.cpp
-            src/wx/main.cpp
         )
-        if(WIN32)
-            add_executable(NeoTPC WIN32 ${NEOTPC_WX_SOURCES})
-        elseif(APPLE)
-            add_executable(NeoTPC MACOSX_BUNDLE ${NEOTPC_WX_SOURCES})
-        else()
-            add_executable(NeoTPC ${NEOTPC_WX_SOURCES})
-        endif()
-        neo_add_windows_version_resource(NeoTPC
-            VERSION "${PROJECT_VERSION}"
-            PRODUCT_NAME "NeoTPC"
-            FILE_DESCRIPTION "NeoTPC Odyssey texture editor and converter"
-            INTERNAL_NAME "NeoTPC"
-            ORIGINAL_FILENAME "NeoTPC.exe"
-            ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/tpc.ico")
-        neo_configure_macos_bundle(NeoTPC
-            NAME "NeoTPC"
-            IDENTIFIER "com.vrifftech.neotpc"
-            ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/tpc.icns"
-        )
-        neo_configure_wasm_target(NeoTPC
-            NAME "NeoTPC"
-            SLUG "neotpc"
-            ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/tpc.svg"
-        )
-        target_link_libraries(NeoTPC PRIVATE neotpc_core neoshared::wx)
+        add_library(neotpc::wx ALIAS neotpc_wx)
+        target_include_directories(neotpc_wx PUBLIC
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/wx
+            ${CMAKE_CURRENT_SOURCE_DIR}/resources)
+        target_link_libraries(neotpc_wx PUBLIC neotpc_core neoshared::wx)
         if(NOT EMSCRIPTEN)
-            target_link_libraries(NeoTPC PRIVATE Threads::Threads)
+            target_link_libraries(neotpc_wx PUBLIC Threads::Threads)
         endif()
-        target_include_directories(NeoTPC PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/wx ${CMAKE_CURRENT_SOURCE_DIR}/resources)
-        neotpc_link_wx(NeoTPC)
-        target_compile_features(NeoTPC PRIVATE cxx_std_17)
+        neotpc_link_wx(neotpc_wx)
+        target_compile_features(neotpc_wx PUBLIC cxx_std_17)
         if(MSVC)
-            target_compile_options(NeoTPC PRIVATE /W4 /permissive- /utf-8)
+            target_compile_options(neotpc_wx PRIVATE /W4 /permissive- /utf-8)
         else()
-            target_compile_options(NeoTPC PRIVATE -Wall -Wextra -Wpedantic)
+            target_compile_options(neotpc_wx PRIVATE -Wall -Wextra -Wpedantic)
         endif()
-        install(TARGETS NeoTPC BUNDLE DESTINATION . RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
-        if(UNIX AND NOT APPLE)
-            foreach(NEO_ICON_SIZE 16 24 32 48 64 128 256 512)
-                install(FILES resources/icons/${NEO_ICON_SIZE}x${NEO_ICON_SIZE}/tpc.png
-                    DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/${NEO_ICON_SIZE}x${NEO_ICON_SIZE}/apps
-                    RENAME neotpc.png)
-            endforeach()
-            install(FILES resources/tpc.svg
-                DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/apps
-                RENAME neotpc.svg)
-            configure_file(resources/neotpc.desktop.in ${CMAKE_CURRENT_BINARY_DIR}/neotpc.desktop @ONLY)
-            install(FILES ${CMAKE_CURRENT_BINARY_DIR}/neotpc.desktop
-                    DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/applications)
+        if(NEOTPC_BUILD_WX_GUI)
+            set(NEOTPC_WX_SOURCES src/wx/main.cpp)
+            if(WIN32)
+                add_executable(NeoTPC WIN32 ${NEOTPC_WX_SOURCES})
+            elseif(APPLE)
+                add_executable(NeoTPC MACOSX_BUNDLE ${NEOTPC_WX_SOURCES})
+            else()
+                add_executable(NeoTPC ${NEOTPC_WX_SOURCES})
+            endif()
+            neo_add_windows_version_resource(NeoTPC
+                VERSION "${PROJECT_VERSION}"
+                PRODUCT_NAME "NeoTPC"
+                FILE_DESCRIPTION "NeoTPC Odyssey texture editor and converter"
+                INTERNAL_NAME "NeoTPC"
+                ORIGINAL_FILENAME "NeoTPC.exe"
+                ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/tpc.ico")
+            neo_configure_macos_bundle(NeoTPC
+                NAME "NeoTPC"
+                IDENTIFIER "com.vrifftech.neotpc"
+                ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/tpc.icns")
+            neo_configure_wasm_target(NeoTPC
+                NAME "NeoTPC"
+                SLUG "neotpc"
+                ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/tpc.svg")
+            target_link_libraries(NeoTPC PRIVATE neotpc::wx)
+            target_include_directories(NeoTPC PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/resources)
+            target_compile_features(NeoTPC PRIVATE cxx_std_17)
+            if(MSVC)
+                target_compile_options(NeoTPC PRIVATE /W4 /permissive- /utf-8)
+            else()
+                target_compile_options(NeoTPC PRIVATE -Wall -Wextra -Wpedantic)
+            endif()
+            install(TARGETS NeoTPC BUNDLE DESTINATION . RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+            if(UNIX AND NOT APPLE)
+                foreach(NEO_ICON_SIZE 16 24 32 48 64 128 256 512)
+                    install(FILES resources/icons/${NEO_ICON_SIZE}x${NEO_ICON_SIZE}/tpc.png
+                        DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/${NEO_ICON_SIZE}x${NEO_ICON_SIZE}/apps
+                        RENAME neotpc.png)
+                endforeach()
+                install(FILES resources/tpc.svg
+                    DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/apps
+                    RENAME neotpc.svg)
+                configure_file(resources/neotpc.desktop.in ${CMAKE_CURRENT_BINARY_DIR}/neotpc.desktop @ONLY)
+                install(FILES ${CMAKE_CURRENT_BINARY_DIR}/neotpc.desktop
+                        DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/applications)
+            endif()
         endif()
-    elseif(NEOTPC_REQUIRE_WX_GUI)
+    elseif(NEOTPC_REQUIRE_WX_GUI OR NEOTPC_BUILD_WX_MODULE)
         message(FATAL_ERROR
-            "The required wxWidgets components were not found, but "
-            "NEOTPC_REQUIRE_WX_GUI is ON. On Debian or Ubuntu, install "
-            "libwxgtk3.2-dev. On Windows, use the pinned wxWidgets 3.3.3 overlay from neoshared. When a toolchain "
-            "hides host programs, configure with "
-            "-DwxWidgets_CONFIG_EXECUTABLE=/usr/bin/wx-config.")
+            "The required wxWidgets components were not found, but a NeoTPC wx target was requested. "
+            "On Debian or Ubuntu, install libwxgtk3.2-dev. On Windows, use the pinned wxWidgets overlay from neoshared.")
     else()
         message(WARNING "wxWidgets was not found. NeoTPC core and CLI targets will still build.")
     endif()

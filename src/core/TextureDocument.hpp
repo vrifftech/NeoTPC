@@ -21,11 +21,14 @@ struct TexturePreview {
 class TextureDocument {
 public:
     void open(const std::filesystem::path& path);
+    void openMemory(std::vector<std::uint8_t> bytes, const std::filesystem::path& logicalPath,
+                    std::string sidecarTxi = {});
     void close() noexcept;
     // Used only after an acknowledged write by this application. Failed loads
     // retain the entire current document; unchanged bytes retain pending edits.
     bool reloadIfSourceChanged();
     bool isOpen() const noexcept { return open_; }
+    bool sourceBacked() const noexcept { return sourceBacked_; }
     bool dirty() const noexcept { return txiDirty_ || contentDirty_ || optionsDirty_; }
     bool txiDirty() const noexcept { return txiDirty_; }
     bool contentDirty() const noexcept { return contentDirty_; }
@@ -91,6 +94,7 @@ private:
     std::vector<std::uint8_t> sourceBytes_;
     std::optional<std::vector<std::uint8_t>> sidecarBytes_;
     bool open_ = false;
+    bool sourceBacked_ = false;
     bool txiDirty_ = false;
     bool contentDirty_ = false;
     bool optionsDirty_ = false;
