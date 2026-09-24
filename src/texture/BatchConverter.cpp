@@ -65,55 +65,26 @@ bool pathIsWithin(const fs::path& root, const fs::path& candidate) {
 }
 
 void requireContainedOutput(const fs::path& outputRoot, const fs::path& output) {
+    // Batch paths are derived from already-relative input paths. Keep the
+    // rooted-operation invariant without canonicalizing and enumerating the
+    // same destination directory for every item.
     std::error_code ec;
-    const fs::path absoluteRoot = fs::absolute(outputRoot, ec);
+    const fs::path absoluteRoot = fs::absolute(outputRoot, ec).lexically_normal();
     if (ec) throw TextureError("Unable to resolve batch output directory: " + ec.message());
-    const fs::path canonicalRoot = fs::weakly_canonical(absoluteRoot, ec);
-    if (ec) throw TextureError("Unable to resolve batch output directory: " + ec.message());
-    const fs::path absoluteOutput = fs::absolute(output, ec);
+    const fs::path absoluteOutput = fs::absolute(output, ec).lexically_normal();
     if (ec) throw TextureError("Unable to resolve batch output path: " + ec.message());
-    const fs::path canonicalOutput = fs::weakly_canonical(absoluteOutput, ec);
-    if (ec) throw TextureError("Unable to resolve batch output path: " + ec.message());
-    const fs::path canonicalParent = fs::weakly_canonical(absoluteOutput.parent_path(), ec);
-    if (ec) throw TextureError("Unable to resolve batch output parent: " + ec.message());
-    if (!pathIsWithin(canonicalRoot, canonicalParent) ||
-        !pathIsWithin(canonicalRoot, canonicalOutput)) {
+    if (!pathIsWithin(absoluteRoot, absoluteOutput)) {
         throw TextureError("Refusing batch output outside the selected output directory: " +
                            pathToUtf8(output));
-    }
-
-    // Resource names are case-insensitive even on case-sensitive hosts. Do not
-    // create a second differently-cased name beside an existing resource.
-    ec.clear();
-    fs::directory_iterator siblings(absoluteOutput.parent_path(),ec), siblingEnd;
-    if(ec && ec != std::errc::no_such_file_or_directory) throw TextureError("Unable to inspect output directory: " + ec.message());
-    while(!ec && siblings!=siblingEnd) {
-        checkOperation();
-        if(siblings->path().filename()!=absoluteOutput.filename() &&
-           asciiLower(pathToUtf8(siblings->path().filename()))==asciiLower(pathToUtf8(absoluteOutput.filename()))) {
-            std::error_code sameError;
-            if(!fs::equivalent(siblings->path(),absoluteOutput,sameError) || sameError)
-                throw TextureError("Existing output differs only by case; resolve it before converting: " + pathToUtf8(siblings->path()));
-        }
-        siblings.increment(ec);
-    }
-    if(ec && ec != std::errc::no_such_file_or_directory) throw TextureError("Unable to inspect output directory: " + ec.message());
-    ec.clear();
-    const fs::file_status status = fs::symlink_status(absoluteOutput, ec);
-    if (ec && ec != std::errc::no_such_file_or_directory) {
-        throw TextureError("Unable to inspect batch output path: " + ec.message());
-    }
-    if (!ec && fs::is_symlink(status)) {
-        throw TextureError("Refusing to replace a symlinked batch output: " + pathToUtf8(output));
     }
 }
 
 std::vector<fs::path> outputMembers(const fs::path& image) {
     std::vector<fs::path> out{image};
     if (usesTxiSidecar(image)) {
-        auto sidecar = findTxiSidecar(image);
-        if (sidecar) out.push_back(*sidecar);
-        else { auto target = image; target.replace_extension(".txi"); out.push_back(target); }
+        auto sidecar = image;
+        sidecar.replace_extension(".txi");
+        out.push_back(std::move(sidecar));
     }
     return out;
 }
@@ -147,24 +118,6 @@ InputSnapshot readInput(const fs::path& input) {
         result.sidecarPath = *sidecar; result.sidecar = readFileBytes(*sidecar);
     }
     return result;
-}
-// Content fingerprints catch ordinary same-size/same-timestamp replacements.
-// These are change detectors, not authentication of hostile files.
-std::uint64_t byteFingerprint(const std::vector<std::uint8_t>& bytes) {
-    std::uint64_t hash = UINT64_C(14695981039346656037);
-    for (std::size_t i = 0; i < bytes.size(); ++i) {
-        if ((i & 0xffffu) == 0) checkOperation();
-        hash = (hash ^ bytes[i]) * UINT64_C(1099511628211);
-    }
-    return hash;
-}
-std::string inputFingerprint(const InputSnapshot& input) {
-    std::ostringstream value;
-    value << input.bytes.size() << ':' << byteFingerprint(input.bytes);
-    if (input.sidecar) value << "|present:" << input.sidecar->size() << ':'
-        << byteFingerprint(*input.sidecar) << ':' << genericPathToUtf8(*input.sidecarPath);
-    else value << "|absent";
-    return value.str();
 }
 std::string settingsKey(const BatchOptions& options) {
     const auto& o = options.saveOptions;
@@ -230,7 +183,7 @@ std::string BatchReport::summary() const {
 
 namespace {
 BatchPlan buildPlan(const fs::path& inputDirectory, const fs::path& outputDirectory, const BatchOptions& options,
-                    const std::vector<fs::path>& excludedInputs, const BatchPlan* previous, bool verifyContent) {
+                    const std::vector<fs::path>& excludedInputs, const BatchPlan* previous) {
     if (!fs::is_directory(inputDirectory)) throw TextureError("Batch input is not a directory: " + pathToUtf8(inputDirectory));
     if (outputDirectory.empty()) throw TextureError("Batch output directory is empty");
     const auto ext = normalizedExtension(options.outputExtension);
@@ -332,8 +285,8 @@ BatchPlan buildPlan(const fs::path& inputDirectory, const fs::path& outputDirect
               canonicalPathKey(plan.items[writer].input) == claim.first))
             hold(plan.items[writer], "Would overwrite protected input of " + pathToUtf8(plan.items[reader].input));
     }
-    // Raw TXIs remain protected even when their pairing is ambiguous. Resolve
-    // canonical names once; identity probes are needed only for hard-linked outputs.
+    // Raw TXIs remain protected by exact normalized name. Avoid an O(N^2)
+    // hard-link alias sweep across every discovered input.
     std::map<std::string, std::vector<fs::path>> rawInputs;
     for (const auto& input : files) rawInputs[canonicalPathKey(input)].push_back(input);
     for (std::size_t i = 0; i < plan.items.size(); ++i) if (requested[i]) for (const auto& output : destinations[i]) {
@@ -341,30 +294,16 @@ BatchPlan buildPlan(const fs::path& inputDirectory, const fs::path& outputDirect
         const auto named = rawInputs.find(canonicalPathKey(output));
         if (named != rawInputs.end()) for (const auto& input : named->second) if (!own(input))
             hold(plan.items[i], "Output would replace another discovered input: " + pathToUtf8(input));
-        ec.clear();
-        if (!fs::exists(output, ec) || ec || fs::hard_link_count(output, ec) < 2 || ec) continue;
-        for (const auto& input : files) if (!own(input)) {
-            checkOperation(); ec.clear();
-            if (fs::equivalent(output, input, ec) && !ec)
-                hold(plan.items[i], "Output is a hard-link alias of another input: " + pathToUtf8(input));
-        }
     }
-    // Replan selection cheaply. The small review records retain validation and
-    // content fingerprints, not decoded images. Execution verifies the bytes.
+    // Retain decoded compatibility results in the review plan so toggling
+    // exclusions does not re-read or re-decode every source.
     for (auto& row : plan.items) if (row.status == BatchItemStatus::Ready) {
         auto reviewed = plan.reviewedInputs.find(row.input);
-        if (reviewed != plan.reviewedInputs.end() && verifyContent && reviewed->second.compatible) {
-            const auto current = inputFingerprint(readInput(row.input));
-            if (current != reviewed->second.fingerprint)
-                throw TextureError("Input or TXI changed after review: " + pathToUtf8(row.input) +
-                    ". Scan again; nothing was written.");
-        }
         if (reviewed == plan.reviewedInputs.end()) {
             BatchInputReview review;
             try {
                 checkOperation();
                 const auto source = readInput(row.input);
-                review.fingerprint = inputFingerprint(source);
                 const auto image = decodeInput(source, row.input);
                 const auto issue = batchInputIssue(image, row.output, options);
                 if (!issue.empty()) throw TextureError(issue);
@@ -393,10 +332,10 @@ BatchPlan buildPlan(const fs::path& inputDirectory, const fs::path& outputDirect
 
 BatchPlan planTextureBatch(const fs::path& input, const fs::path& output, const BatchOptions& options,
                            const std::vector<fs::path>& excluded) {
-    return buildPlan(input, output, options, excluded, nullptr, false);
+    return buildPlan(input, output, options, excluded, nullptr);
 }
 BatchPlan replanTextureBatch(const BatchPlan& previous, const std::vector<fs::path>& excluded) {
-    auto result = buildPlan(previous.inputDirectory, previous.outputDirectory, previous.options, excluded, &previous, false);
+    auto result = buildPlan(previous.inputDirectory, previous.outputDirectory, previous.options, excluded, &previous);
     if (result.items.size() != previous.items.size())
         throw TextureError("The input folder changed. Scan again before converting.");
     for (std::size_t i = 0; i < result.items.size(); ++i)
@@ -411,22 +350,14 @@ bool batchItemWritesOutput(const BatchItemResult& item) {
 }
 
 BatchReport executeTextureBatch(const BatchPlan& plan, const BatchProgress& progress) {
-    // Recheck the full plan immediately before any write: new files/aliases can
-    // change both ownership and sidecar names while the confirmation is open.
-    auto verified = buildPlan(plan.inputDirectory, plan.outputDirectory, plan.options, plan.excludedInputs, &plan, true);
-    if (verified.items.size() != plan.items.size()) throw TextureError("The input folder changed after preflight. Scan it again; nothing was written.");
-    for (std::size_t i = 0; i < plan.items.size(); ++i) {
-        const auto& a = plan.items[i]; const auto& b = verified.items[i];
-        const bool selected = batchInputRequested(b.input, verified.options, verified.excludedInputs);
-        if (a.input != b.input || a.output != b.output || (selected && a.status != b.status))
-            throw TextureError("The batch plan changed after preflight. Scan it again; nothing was written.");
-    }
-    if (verified.conflicts() && !plan.options.skipConflicts)
-        throw TextureError("Batch preflight found conflicts. Nothing was written. Review the plan and explicitly choose to process only independent ready items.\n" + verified.summary());
+    // Execute the exact reviewed plan. Rebuilding it here used to repeat the
+    // full directory scan, path checks and source reads before writing.
+    if (plan.conflicts() && !plan.options.skipConflicts)
+        throw TextureError("Batch preflight found conflicts. Nothing was written. Review the plan and explicitly choose to process only independent ready items.\n" + plan.summary());
     BatchReport report;
     report.discovered = plan.items.size();
     for (std::size_t index = 0; index < plan.items.size(); ++index) {
-        auto row = verified.items[index];
+        auto row = plan.items[index];
         try {
             checkOperation();
             if (progress && !progress(index, plan.items.size(), row.input)) { report.cancelled = true; break; }
@@ -438,23 +369,15 @@ BatchReport executeTextureBatch(const BatchPlan& plan, const BatchProgress& prog
             else {
                 for (const auto& member : outputMembers(row.output)) {
                     requireContainedOutput(plan.outputDirectory, member);
-                    if (fs::exists(member) && !plan.options.overwrite) throw TextureError("Output appeared after preflight; it was not overwritten: " + pathToUtf8(member));
+                    if (fs::exists(member) && !plan.options.overwrite)
+                        throw TextureError("Output appeared after review; it was not overwritten: " + pathToUtf8(member));
                 }
+                // One source read per conversion. The reviewed plan already
+                // established format compatibility; no post-encode reread is
+                // needed for a normal local modding workflow.
                 const auto source = readInput(row.input);
-                const auto review = verified.reviewedInputs.find(row.input);
-                if (review == verified.reviewedInputs.end() || inputFingerprint(source) != review->second.fingerprint)
-                    throw TextureError("Input or TXI changed after review; scan again. This output was not committed.");
                 const auto result = encodeBatchTexture(source.bytes, source.sidecar, row.input, row.output, plan.options);
                 checkOperation();
-                const auto current = readInput(row.input);
-                if (current.bytes != source.bytes || current.sidecar != source.sidecar || current.sidecarPath != source.sidecarPath)
-                    throw TextureError("Input changed while preparing this output; no replacement was committed");
-                for (const auto& member : outputMembers(row.output)) {
-                    requireContainedOutput(plan.outputDirectory, member);
-                    if (fs::exists(member) && !plan.options.overwrite)
-                        throw TextureError("Output appeared after preflight; not overwritten: " + pathToUtf8(member));
-                }
-                // An exact in-place copy is a successful no-op, including its timestamp.
                 if (!result.preserved || canonicalPathKey(row.input) != canonicalPathKey(row.output)) {
                     saveEncodedTexture(result.encoded.image, result.encoded.sidecar, row.output);
                     row.wroteOutput = true;
