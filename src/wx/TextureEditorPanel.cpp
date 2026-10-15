@@ -1256,7 +1256,11 @@ private:
         std::array<wxTextCtrl*, 6> fields{};
         std::array<wxWindow*, 6> controls{};
         wxChoice* procedure = nullptr;
-        const auto entries = texture::parseTxiEntries(document_.texture().txi);
+        std::vector<texture::TxiEntry> entries;
+        try {entries=texture::parseTxiEntries(document_.texture().txi);}
+        catch(const std::exception& e) {
+            wxMessageBox(wxui::toWx(e.what()),"TXI stream is incomplete",wxOK|wxICON_WARNING,this);return;
+        }
         for (int group = 0; group < 2; ++group) {
             auto* box = new layout::GroupSizer(content, group == 0 ? "Animation" : "Material references");
             for (int i = group == 0 ? 0 : 4; i < (group == 0 ? 4 : 6); ++i) {
@@ -1327,7 +1331,7 @@ private:
         if (dialog.ShowModal() != wxID_OK || candidate == document_.texture().txi) return;
         try {
             document_.finishEditGroup(); document_.setTxi(std::move(candidate)); document_.finishEditGroup();
-            loading_ = true; txiEditor_->setValue(wxui::toWx(document_.texture().txi)); loading_ = false;
+            loading_ = true; txiEditor_->setRawValue(document_.texture().txi); loading_ = false;
             const bool playing = animationTimer_.IsRunning();
             afterPixelChange(); refreshTxiValidation();
             if (playing) setAnimationPlaying(true);
@@ -1465,7 +1469,7 @@ private:
             discardEncodedPreview();
             if (playing) setAnimationPlaying(true);
             loading_ = true;
-            txiEditor_->setValue(wxui::toWx(document_.texture().txi));
+            txiEditor_->setRawValue(document_.texture().txi);
             loading_ = false;
             summary_->ChangeValue(wxui::toWx(document_.summary()));
             refreshTxiValidation();
@@ -2107,7 +2111,7 @@ private:
         mipChoice_->Clear();
         if (!document_.isOpen()) {
             summary_->ChangeValue(wxEmptyString);
-            txiEditor_->setValue(wxEmptyString, false);
+            txiEditor_->setRawValue({}, false);
             txiIssues_->setIssues({});
             txiSummary_->SetLabel("No TXI metadata");
             txiHelp_->SetLabel(
@@ -2147,7 +2151,7 @@ private:
                 "Type a directive or press Ctrl+Space for TXI index suggestions. Save or convert the texture to write it.");
         }
         if (resetExport) notebook_->SetSelection(texture.kind == texture::TextureFileKind::Txi ? 1 : 0);
-        txiEditor_->setValue(wxui::toWx(texture.txi), !resetExport);
+        txiEditor_->setRawValue(texture.txi, !resetExport);
         summary_->ChangeValue(wxui::toWx(document_.summary()));
         loading_ = false;
         refreshTxiValidation();
@@ -2275,7 +2279,9 @@ private:
             else if (issue.severity == texture::TxiIssueSeverity::Warning) ++warnings;
             else ++infos;
         }
-        if (issues.empty()) {
+        if (txiEditor_->binaryPayloadView()) {
+            txiSummary_->SetLabel("Binary channel arrays: read-only projection; raw bytes retained. Common-field edits preserve payloads.");
+        } else if (issues.empty()) {
             txiSummary_->SetLabel(document_.texture().txi.empty() ? "No TXI metadata" : "TXI syntax/directive checks passed (not a game-layout check)");
         } else {
             txiSummary_->SetLabel(wxString::Format("%llu error(s), %llu warning(s), %llu information note(s)",
@@ -2293,7 +2299,7 @@ private:
     }
 
     void onTxiChanged() {
-        if (busy_ || loading_ || !document_.isOpen()) return;
+        if (busy_ || loading_ || !document_.isOpen() || txiEditor_->binaryPayloadView()) return;
         document_.setTxi(wxui::toStd(txiEditor_->value()));
         const bool playing=animationTimer_.IsRunning();
         discardEncodedPreview();

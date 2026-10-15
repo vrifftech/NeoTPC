@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <functional>
 #include <string>
+#include <vector>
 
 namespace neotpc {
 
@@ -26,11 +27,17 @@ public:
     // A new document explicitly requests a reset.
     void setValue(const wxString& value, bool preserveView = true);
     wxString value() const;
+    // Binary TXI is projected for inspection, never rewritten by a UTF-8 text
+    // widget. Raw payload bytes remain in TextureDocument and codec output.
+    void setRawValue(const std::string& bytes, bool preserveView = true);
+    bool binaryPayloadView() const noexcept { return binaryPayloadView_; }
     void applyTheme(bool darkMode);
     void goToOneBasedLine(std::size_t lineNumber);
     void setHintHandler(HintHandler handler);
 
 private:
+    bool binaryPayloadView_{};
+    std::vector<std::size_t> projectedLines_;
     enum class PendingCompletionKind {
         None,
         Directive,

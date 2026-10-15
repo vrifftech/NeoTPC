@@ -135,6 +135,11 @@ void TxiEditor::applyTheme(bool darkMode) {
 
 void TxiEditor::goToOneBasedLine(std::size_t lineNumber) {
     if (lineNumber == 0) return;
+    if(binaryPayloadView_) {
+        const auto found=std::find(projectedLines_.begin(),projectedLines_.end(),lineNumber);
+        if(found==projectedLines_.end())return;
+        lineNumber=static_cast<std::size_t>(found-projectedLines_.begin())+1;
+    }
     if (lineNumber > static_cast<std::size_t>(GetNumberOfLines())) return;
     const long position = XYToPosition(0, static_cast<long>(lineNumber - 1));
     if (position < 0) return;
@@ -272,6 +277,11 @@ void TxiEditor::applyTheme(bool darkMode) {
 
 void TxiEditor::goToOneBasedLine(std::size_t lineNumber) {
     if (lineNumber == 0) return;
+    if(binaryPayloadView_) {
+        const auto found=std::find(projectedLines_.begin(),projectedLines_.end(),lineNumber);
+        if(found==projectedLines_.end())return;
+        lineNumber=static_cast<std::size_t>(found-projectedLines_.begin())+1;
+    }
     const int zeroBased = static_cast<int>(lineNumber - 1);
     const int position = PositionFromLine(zeroBased);
     if (position < 0) return;
@@ -332,7 +342,36 @@ void TxiEditor::onUpdateUi(wxStyledTextEvent& event) {
 
 #endif
 
+void TxiEditor::setRawValue(const std::string& bytes, bool preserveView) {
+    bool binary=false;std::string text=bytes;projectedLines_.clear();
+    try {
+        const auto rows=neoshared::texture::scanTxiStream(bytes);
+        binary=std::any_of(rows.begin(),rows.end(),[](const auto& row){return row.binary;});
+        if(binary) {
+            auto view=neoshared::texture::txiTextView(bytes);
+            text=std::move(view.text);projectedLines_=std::move(view.sourceLines);
+        }
+    } catch(const std::exception&) {
+        // Incomplete plain text stays editable; validateTxiText reports it.
+        // Decoders reject malformed mixed-binary resources before this point.
+    }
+    binaryPayloadView_=binary;
+#ifdef __EMSCRIPTEN__
+    SetEditable(true);
+#else
+    SetReadOnly(false);
+#endif
+    setValue(wxui::toWx(text),preserveView);
+#ifdef __EMSCRIPTEN__
+    SetEditable(!binary);
+#else
+    SetReadOnly(binary);
+#endif
+    if(binary)setHint("Binary channel arrays: read-only text projection. Raw bytes are retained for save/export and common-field edits.");
+}
+
 void TxiEditor::onKeyDown(wxKeyEvent& event) {
+    if(binaryPayloadView_){event.Skip();return;}
     if (!event.ControlDown() && !event.MetaDown() && !event.AltDown() &&
         !event.ShiftDown() && event.GetKeyCode() == WXK_TAB && acceptPendingCompletion()) {
         return;
@@ -354,6 +393,7 @@ void TxiEditor::onKeyDown(wxKeyEvent& event) {
 }
 
 void TxiEditor::updateCompletion(bool explicitRequest) {
+    if(binaryPayloadView_)return;
 #ifndef __EMSCRIPTEN__
     lastCaretPosition_ = GetCurrentPos();
 #endif
