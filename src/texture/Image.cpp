@@ -353,10 +353,10 @@ void saveTexture(const TextureData& texture, const std::filesystem::path& output
 std::string imageCodecSupportReport() {
     std::ostringstream out;
     out << "Texture image codec support:\n";
-    out << "  TPC: storage-checked raw/grayscale/DXT1/DXT5 output; square animation frames; base-only rectangular static output; legacy/Xbox input remains readable\n";
+    out << "  TPC: raw/grayscale/DXT1/DXT5 output; PVRTC4 and legacy/Xbox input; square animation frames; base-only rectangular static output\n";
     out << "  TXB: built-in read-only conversion support for Xbox swizzled BGRA/grayscale and DXT1/DXT5 textures\n";
-    out << "  DDS: game 20-byte-header DXT1/DXT5 output (default for new files), or explicit standard DDS interchange; imported dialect is retained\n";
-    out << "  TGA: origin-aware input, bottom-origin game output, raw cube-strip conversion\n";
+    out << "  DDS: game 20-byte-header DXT1/DXT5 output; standard DDS input includes DX10, BC4/BC5/BC7 and 2D/cubemap surfaces; imported dialect is retained\n";
+    out << "  TGA: 15/16/24/32-bit palettes, origin-aware input, bottom-origin game output, raw cube-strip conversion\n";
     out << "  BMP: built-in read/write for 1/4/8-bit paletted and 16/24/32-bit truecolor BMP\n";
     out << "  PNG: provided by the external libspng dependency\n";
     out << "  JPEG/JPG: provided through the libjpeg API (vcpkg uses libjpeg-turbo); alpha is dropped on JPEG output\n";
