@@ -45,8 +45,8 @@ inline std::string commonTxiValueIssue(std::string_view key, const std::string& 
         // accept locale commas then write text the texture parser can't read.
         std::istringstream in(value); in.imbue(std::locale::classic());
         double number = 0;
-        if (!(in >> number) || !std::isfinite(number) || number <= 0)
-            return "Enter a positive, finite FPS with a decimal point (for example 8 or 7.5), or leave blank.";
+        if (!(in >> number) || !std::isfinite(number))
+            return "Enter a finite FPS with a decimal point (for example 8 or 7.5); 0 pauses in-game, or leave blank.";
         in >> std::ws;
         if (!in.eof()) return "Enter one FPS number using a decimal point, not a comma.";
     } else if (key == "proceduretype") {
