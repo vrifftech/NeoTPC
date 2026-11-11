@@ -70,6 +70,7 @@ public:
         if (!wxApp::OnInit()) return false;
         SetAppName("NeoTPC");
         SetVendorName("Neo Tools");
+        wxui::initializeTheme("NeoTPC");
         wxInitAllImageHandlers();
         auto* frame = new NeoTpcFrame;
         frame->Show(true);
