@@ -4,6 +4,10 @@
 
 NeoTPC is a cross-platform texture viewer, editor, and converter for BioWare/Odyssey texture assets. It is aimed primarily at KotOR modding and includes both a wxWidgets desktop application and a command-line tool.
 
+Support is offered in the OpenKotOR Discord.
+
+[![OpenKotOR Discord](https://discordapp.com/api/guilds/739590575359262792/widget.png?style=banner2)](https://discord.gg/OpenKotOR)
+
 ## Features
 
 - Open **TPC, TXB, TGA, DDS, PNG, JPEG, BMP, and TXI** files.
