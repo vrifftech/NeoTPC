@@ -23,6 +23,7 @@
 #include "NeoGameDirectoryMenu.hpp"
 
 #include <wx/aboutdlg.h>
+#include <wx/artprov.h>
 #include <wx/choice.h>
 #include <wx/choicdlg.h>
 #include <wx/checkbox.h>
@@ -37,6 +38,7 @@
 #include <wx/scrolwin.h>
 #include <wx/splitter.h>
 #include <wx/statbox.h>
+#include <wx/statbmp.h>
 #include <wx/tglbtn.h>
 #include <wx/timer.h>
 #include <wx/wx.h>
@@ -914,6 +916,18 @@ private:
         destinationRow->Add(new wxButton(page, ID_CHOOSE_EXPORT, "Destination..."), 0);
         root->Add(destinationRow, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(8));
         Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { chooseExportDestination(); }, ID_CHOOSE_EXPORT);
+        exportError_ = new wxPanel(page, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBORDER_SIMPLE);
+        exportError_->SetName("Export error");
+        auto* errorRow = new wxBoxSizer(wxHORIZONTAL);
+        errorRow->Add(new wxStaticBitmap(exportError_, wxID_ANY,
+            wxArtProvider::GetBitmap(wxART_ERROR, wxART_MESSAGE_BOX, FromDIP(wxSize(24, 24)))),
+            0, wxALL, FromDIP(8));
+        exportErrorText_ = new layout::WrappedLabel(exportError_, wxID_ANY, wxEmptyString);
+        exportErrorText_->SetFont(exportErrorText_->GetFont().Bold());
+        errorRow->Add(exportErrorText_, 1, wxEXPAND | wxALL, FromDIP(8));
+        exportError_->SetSizer(errorRow);
+        exportError_->Hide();
+        root->Add(exportError_, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(8));
         auto* exportButtons = new wxWrapSizer(wxHORIZONTAL);
         exportButtons->Add(new wxButton(page,ID_ENCODE_PREVIEW,"Preview output"),0,wxRIGHT | wxBOTTOM,FromDIP(6));
         exportButtons->Add(new wxButton(page,ID_EXPORT_IMAGE,"Export copy..."),0,wxBOTTOM,FromDIP(6));
@@ -1178,7 +1192,7 @@ private:
     bool buildEncodedPreview() {
         if(busy_ || !document_.isOpen())return false;
         const auto issue=document_.outputIssue(proposedOutput(),optionsPanel_->options());
-        if(!issue.empty()){refreshExportSummary();wxMessageBox(wxui::toWx(issue),"Choose compatible settings",wxOK|wxICON_INFORMATION,this);return false;}
+        if(!issue.empty()){refreshExportSummary();wxMessageBox(wxui::toWx(issue),"Cannot export",wxOK|wxICON_ERROR,this);return false;}
         try {
             setAnimationPlaying(false);TextureBusyGuard busy(busy_);
             const auto output=proposedOutput();const auto options=optionsPanel_->options();
@@ -2313,7 +2327,13 @@ private:
         const bool open = document_.isOpen();
         enableModuleCommand(wxID_UNDO,open&&document_.canUndo());
         enableModuleCommand(wxID_REDO,open&&document_.canRedo());
-        const bool validExport=open && document_.outputIssue(proposedOutput(),optionsPanel_->options()).empty();
+        const auto issue = open ? document_.outputIssue(proposedOutput(), optionsPanel_->options()) : std::string{};
+        const bool validExport = open && issue.empty();
+        exportErrorText_->SetLabel("Cannot export\n" + wxui::toWx(issue));
+        exportError_->Show(!issue.empty());
+        encodingSummary_->Show(issue.empty());
+        exportPage_->Layout();
+        exportPage_->FitInside();
         enableModuleCommand(ID_EXPORT_IMAGE,open); // Opens settings even when the current combination is invalid.
         const bool sourceWritable = open && workflow::writableFormat(document_.texture().kind);
         const bool editablePixels = open && document_.texture().hasPixels();
@@ -2522,6 +2542,8 @@ private:
     wxChoice* samplingChoice_=nullptr;
     wxChoice* gridChoice_=nullptr;
     wxStaticText* encodingSummary_=nullptr;
+    wxPanel* exportError_ = nullptr;
+    wxStaticText* exportErrorText_ = nullptr;
     wxTextCtrl* exportPath_=nullptr;
     wxStaticText* imageInfo_=nullptr;
     fs::path exportDestination_;
