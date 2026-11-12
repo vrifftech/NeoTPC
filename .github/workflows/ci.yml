@@ -203,5 +203,5 @@ jobs:
       contents: write
     uses: vrifftech/neoshared/.github/workflows/publish-release.yml@main
     with:
-      version-file: CMakeLists.txt
+      version-file: src/core/Version.hpp
       artifact-pattern: NeoTPC-*

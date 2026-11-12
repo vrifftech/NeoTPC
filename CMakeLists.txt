@@ -7,8 +7,12 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR AND NOT DEFINED CMAKE_MSVC
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "MSVC runtime library")
 endif()
 
-project(NeoTPC VERSION 1.0.0 DESCRIPTION "C++17/wxWidgets Odyssey texture viewer and converter" LANGUAGES CXX)
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/NeoSharedSource.cmake")
+include("${NEOSHARED_ROOT}/cmake/NeoVersion.cmake")
+neo_read_version_header(NEOTPC_VERSION
+    "${CMAKE_CURRENT_LIST_DIR}/src/core/Version.hpp"
+    NEOTPC_VERSION_STRING)
+project(NeoTPC VERSION ${NEOTPC_VERSION} DESCRIPTION "C++17/wxWidgets Odyssey texture viewer and converter" LANGUAGES CXX)
 
 if(MSVC AND CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     foreach(_neo_runtime_flag_var IN ITEMS
@@ -46,7 +50,6 @@ include(GNUInstallDirs)
 
 message(STATUS "Using neoshared: ${NEOSHARED_ROOT}")
 include("${NEOSHARED_ROOT}/cmake/NeoMinimalRelease.cmake")
-include("${NEOSHARED_ROOT}/cmake/NeoVersion.cmake")
 include("${NEOSHARED_ROOT}/cmake/NeoMacOSBundle.cmake")
 include("${NEOSHARED_ROOT}/cmake/NeoWasm.cmake")
 if(NOT TARGET neoshared::wx)
