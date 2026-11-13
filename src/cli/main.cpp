@@ -153,6 +153,7 @@ void applyConvertState(neotpc::texture::TextureData& texture, const ConvertState
     if (state.txiFile) {
         const auto bytes = neotpc::texture::readFileBytes(*state.txiFile);
         texture.txi.assign(bytes.begin(), bytes.end());
+        if (const auto alpha = neotpc::texture::getTxiAlphaBlending(texture.txi)) texture.alphaBlending = *alpha;
     }
     for (const auto& entry : state.txiValues) {
         texture.txi = neotpc::texture::setTxiValue(texture.txi, entry.first, entry.second);

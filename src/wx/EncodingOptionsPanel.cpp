@@ -58,7 +58,7 @@ EncodingOptionsPanel::EncodingOptionsPanel(wxWindow* parent, bool resizeTopLevel
     ddsDialect_->SetName("DDS container");
     jpegQuality_->SetName("JPEG quality");
     dxt1Threshold_->SetName("Standard DDS BC1 threshold");
-    alphaBlending_->SetName("Native texture header value");
+    alphaBlending_->SetName("Alpha Blending");
 
     auto addRow = [this, grid, details, advancedGrid](const wxString& label, wxWindow* control) {
         auto* parent = control->GetParent();
@@ -83,7 +83,7 @@ EncodingOptionsPanel::EncodingOptionsPanel(wxWindow* parent, bool resizeTopLevel
     addRow("DXT metric", dxtMetric_);
     addRow("DXT1 threshold", dxt1Threshold_);
     addRow("JPEG quality", jpegQuality_);
-    addRow("Header float", alphaBlending_);
+    addRow("Alpha Blending", alphaBlending_);
     outer->Add(grid, 0, wxEXPAND | wxALL, FromDIP(8));
 
     detailsSizer->Add(advancedGrid, 0, wxEXPAND | wxBOTTOM, FromDIP(8));
@@ -129,7 +129,7 @@ EncodingOptionsPanel::EncodingOptionsPanel(wxWindow* parent, bool resizeTopLevel
     mipmaps_->SetToolTip("Preserve keeps supplied levels; creates a chain if absent. Rebuild replaces all lower levels. Base only removes them. Game TPC rectangles need base only + mipmap 0; cubes and animation need a complete chain.");
     mipAlpha_->SetToolTip("Choose Transparency only when alpha represents opacity. Mask/data channels must stay independent. Applies when generating or rebuilding levels, never to untouched levels.");
     mipColor_->SetToolTip("sRGB filtering is for color artwork, not normal/height maps or independent data. No automatic reinterpretation of imported images.");
-    alphaBlending_->SetToolTip("Stored TPC/game DDS header value; this is separate from pixel transparency.");
+    alphaBlending_->SetToolTip("TPC/game DDS alpha blending header value, separate from pixel transparency. Imported from # alphablending TXI comments; change it here to override the imported value.");
     dxt1Threshold_->SetToolTip("Standard DDS BC1 only. The inspected native TPC/game DDS paths use opaque RGB BC1; use DXT5 for transparency there.");
     jpegQuality_->SetToolTip("JPEG output discards alpha.");
     SetSizer(outer);

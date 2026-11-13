@@ -1479,6 +1479,7 @@ private:
             TextureBusyGuard busy(busy_);
             const auto imported=runTextureTask(this,"Import TXI",[&](TextureTaskProgress&){return texture::loadTexture(path);});
             document_.finishEditGroup(); document_.setTxi(imported.txi); document_.finishEditGroup();
+            syncTxiAlphaBlending();
             const bool playing = animationTimer_.IsRunning();
             discardEncodedPreview();
             if (playing) setAnimationPlaying(true);
@@ -2312,9 +2313,18 @@ private:
         updateWindowState();
     }
 
+    void syncTxiAlphaBlending() {
+        if (const auto alpha = texture::getTxiAlphaBlending(document_.texture().txi)) {
+            auto options = optionsPanel_->options();
+            options.alphaBlending = *alpha;
+            optionsPanel_->setOptions(options);
+        }
+    }
+
     void onTxiChanged() {
         if (busy_ || loading_ || !document_.isOpen() || txiEditor_->binaryPayloadView()) return;
         document_.setTxi(wxui::toStd(txiEditor_->value()));
+        syncTxiAlphaBlending();
         const bool playing=animationTimer_.IsRunning();
         discardEncodedPreview();
         if (playing) setAnimationPlaying(true);

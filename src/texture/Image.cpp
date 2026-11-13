@@ -3,6 +3,7 @@
 #include "texture/FileUtil.hpp"
 #include "texture/Error.hpp"
 #include "texture/Operation.hpp"
+#include "texture/Txi.hpp"
 #include "texture/ParserLimits.hpp"
 
 #include <algorithm>
@@ -333,6 +334,8 @@ EncodedTexture encodeTexture(const TextureData& input, const std::filesystem::pa
     TextureData texture = input;
     if (texture.cubeMap && !parseTxiFeatures(texture.txi).cube)
         texture.txi = setTxiValue(texture.txi, "cube", "1");
+    texture.txi = setTxiAlphaBlending(texture.txi,
+        options.alphaBlending.value_or(texture.alphaBlending));
     if (options.flipXOnSave) flipTextureHorizontal(texture);
     if (options.flipYOnSave) flipTextureVertical(texture);
     EncodedTexture result;

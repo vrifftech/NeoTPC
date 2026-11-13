@@ -153,6 +153,7 @@ void TextureDocument::setSaveOptions(const texture::TextureSaveOptions& options)
 void TextureDocument::setTxi(std::string txi) {
     if (!open_ || texture_.txi == txi) return;
     beforeEdit("TXI edit", true);
+    if (const auto alpha = texture::getTxiAlphaBlending(txi)) options_.alphaBlending = *alpha;
     texture_.txi = std::move(txi); ++revision_; refreshDirty();
 }
 void TextureDocument::editPixels(const std::string& label, const std::function<void(texture::TextureData&)>& edit) {
@@ -255,7 +256,7 @@ TexturePreview TextureDocument::preview(const std::filesystem::path& output, con
     result.decoded = loadTextureBytes(result.encoded.image, output,
         result.encoded.sidecar ? std::string(result.encoded.sidecar->begin(), result.encoded.sidecar->end()) : std::string());
     if (reencode && result.outputKind == TextureFileKind::Tpc) {
-        auto exactTxi = texture_.txi;
+        auto exactTxi = setTxiAlphaBlending(texture_.txi, {});
         for (const auto& entry : parseTxiEntries(result.decoded.txi)) {
             if (getTxiValue(exactTxi, entry.key) != getTxiValue(result.decoded.txi, entry.key))
                 exactTxi = setTxiValue(exactTxi, entry.key, entry.value);

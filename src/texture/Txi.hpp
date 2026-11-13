@@ -15,6 +15,8 @@ using neoshared::texture::txiIssueSeverityToString;
 using neoshared::texture::txiDirectiveCatalog;
 using neoshared::texture::findTxiDirective;
 using neoshared::texture::parseTxiEntries;
+using neoshared::texture::getTxiAlphaBlending;
+using neoshared::texture::setTxiAlphaBlending;
 using neoshared::texture::validateTxiText;
 using neoshared::texture::txiValidationReport;
 using neoshared::texture::txiCatalogReport;
