@@ -2,7 +2,7 @@
   "name": "neotpc",
   "version-string": "1.0.0",
   "description": "Odyssey texture viewer, TXI inspector, and converter",
-  "builtin-baseline": "40f3c709db80acf154ac4b17a1f83c564ebd022e",
+  "builtin-baseline": "9e593bb18ea69cc5095e012465dcd675a822ed0d",
   "dependencies": [
     "libjpeg-turbo",
     "libspng",
