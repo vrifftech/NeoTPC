@@ -1,3 +1,4 @@
+#include "NeoUpdater.hpp"
 #include "TextureEditorPanel.hpp"
 #include "PathUtils.hpp"
 #include "NeoSettings.hpp"
@@ -74,6 +75,10 @@ public:
         wxInitAllImageHandlers();
         auto* frame = new NeoTpcFrame;
         frame->Show(true);
+#if !defined(__EMSCRIPTEN__)
+        neoupdate::install(*frame, NEO_UPDATE_APPLICATION, NEO_UPDATE_VERSION);
+#endif
+
         if (argc > 1) {
             const auto path = neotpc::wxpath::fromWx(wxString(argv[1]));
             frame->CallAfter([frame, path]() { frame->openStartup(path); });

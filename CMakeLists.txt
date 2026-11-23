@@ -246,6 +246,7 @@ if(NEOTPC_BUILD_WX_GUI OR NEOTPC_BUILD_WX_MODULE)
                 NAME "NeoTPC"
                 SLUG "neotpc"
                 ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/tpc.svg")
+            neo_enable_updates(NeoTPC "NeoTPC" "${PROJECT_VERSION}")
             target_link_libraries(NeoTPC PRIVATE neotpc::wx)
             target_include_directories(NeoTPC PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/resources)
             target_compile_features(NeoTPC PRIVATE cxx_std_17)
