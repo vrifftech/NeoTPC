@@ -75,7 +75,7 @@ public:
         wxInitAllImageHandlers();
         auto* frame = new NeoTpcFrame;
         frame->Show(true);
-#if !defined(__EMSCRIPTEN__)
+#if defined(NEO_UPDATE_APPLICATION)
         neoupdate::install(*frame, NEO_UPDATE_APPLICATION, NEO_UPDATE_VERSION);
 #endif
 
