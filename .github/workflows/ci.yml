@@ -87,8 +87,7 @@ jobs:
             --vcpkg-root ../vcpkg \
             --vcpkg-triplet x64-linux \
             --jobs 2 \
-            --clean \
-            --cmake-arg=-DwxWidgets_CONFIG_EXECUTABLE="$WX_CONFIG"
+            --clean
 
       - name: Verify AppImage checksum
         run: |
