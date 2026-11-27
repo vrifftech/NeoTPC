@@ -116,6 +116,7 @@ enum : int {
     ID_PREVIOUS_FRAME, ID_NEXT_FRAME, ID_COMPARE_IMAGES, ID_CHOOSE_EXPORT,
     ID_FONT_INCREASE, ID_FONT_DECREASE, ID_FONT_RESET,
     ID_TXI_DICTIONARY,
+    ID_OPEN_TEXTURE,
 };
 
 const char* openWildcard() {
@@ -535,7 +536,7 @@ private:
     void buildMenus() {
         auto* menuBar = new wxMenuBar();
         auto* file = new wxMenu();
-        file->Append(wxID_OPEN, context_.embedded ? "&Open..." : "&Open...\tCtrl+O");
+        file->Append(ID_OPEN_TEXTURE, context_.embedded ? "&Open..." : "&Open...\tCtrl+O");
         recentFilesMenu_ = new wxMenu();
         file->AppendSubMenu(recentFilesMenu_, "Open &Recent");
         file->AppendSeparator();
@@ -601,7 +602,7 @@ private:
         setModuleMenus(menuBar);
 
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { showReferencePage(); }, ID_TXI_DICTIONARY);
-        Bind(wxEVT_MENU, [this](wxCommandEvent&) { chooseOpen(); }, wxID_OPEN);
+        Bind(wxEVT_MENU, [this](wxCommandEvent&) { chooseOpen(); }, ID_OPEN_TEXTURE);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { save(); }, wxID_SAVE);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { saveAs(); }, ID_SAVE_AS);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { showExportPage(); }, ID_EXPORT_IMAGE);
